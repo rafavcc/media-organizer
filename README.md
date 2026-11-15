@@ -9,7 +9,7 @@ A service that runs on the Windows 11 PC (inside Ubuntu in WSL2) and makes your 
    - it has the same width and height, the same number of audio tracks and (video) the same length within 1 second; images must also look the same (similarity score at least 0.95);
    - the new file is in its final place with the right size, and the original has not been changed since the program read it.
 
-The recipes (quality settings and checks) are the same as in the old `app_compactor` tool. Two web pages and a log show progress: see "Daily use".
+The recipes (quality settings and checks) are the same as in the old `app_compactor` tool. One dashboard page and a log show progress: see "Daily use".
 
 ## Contents
 
@@ -108,31 +108,75 @@ The first full pass over the roughly 860 GB in D: takes **days to weeks**. That 
 
    **Rollback:** stop the service (`systemctl --user disable --now media-organizer`), run `crontab -e` again and put the line back (your saved copy is `~/crontab-before.txt`). Keep the old scripts in place for a month as a fallback.
 
-5. **Staged trials on copies (do not skip).** The program deletes originals, and it has not yet been run on real data (see "Status of this release"). Run it first against throw-away copies, with its own settings file and its own state folder, so the real database stays untouched. Create `~/media-organizer-trial.toml`:
+5. **Staged trials on copies (do not skip).** The program deletes originals, and it has not yet been run on real data (see "Status of this release"). Run it first against throw-away copies, with a settings file and a state folder of its own per trial, so the real database stays untouched. Each trial has its **own complete settings file** with every path key written out, so no real folder is ever inherited from an earlier trial. Create the four files below (`~/media-organizer-trial1.toml` to `~/media-organizer-trial4.toml`). Paths of the Windows side (`d_root`, `win_downloads`, `state_dir`) are full Linux paths; `mac_mega` and `mac_downloads` are relative to the Mac's home folder; `mega_intake` is a folder inside `mac_mega`. Create the trial folders first (`mkdir -p /mnt/d/_trial /mnt/c/Users/rafavcc/trial-downloads`; the Mac ones on the Mac).
+
+   **Trial 1: a copied folder** of about 10 mixed files (videos and images), copied with Windows Explorer or `cp -r` into `/mnt/d/_trial/`. `~/media-organizer-trial1.toml`:
 
    ```toml
    d_root = "/mnt/d/_trial"
    win_downloads = "/mnt/c/Users/rafavcc/trial-downloads"
+   state_dir = "~/.local/share/media-organizer-trial1"
    mac_mega = "Library/Mobile Documents/com~apple~CloudDocs/MEGA/MEGA_TRIAL"
    mac_downloads = "Downloads/trial"
    mega_intake = "TBC"
-   state_dir = "~/.local/share/media-organizer-trial"
    web_port = 8766
    web_password = "trial"
    ```
 
-   Paths of the Windows side (`d_root`, `win_downloads`, `state_dir`) are full Linux paths; `mac_mega` and `mac_downloads` are relative to the Mac's home folder; `mega_intake` is a folder inside `mac_mega`. Run a trial in the foreground:
+   Must stay untouched: everything in `D:\7_XYZ` outside `_trial`, the real Downloads folders, the real `MEGA` folder and the real service database.
 
-   ```bash
-   python3 -m media_organizer.cli --config ~/media-organizer-trial.toml run --no-web
+   **Trial 2: one person's folder on D:** (the real files, so first make sure you have a backup of that folder). `~/media-organizer-trial2.toml`:
+
+   ```toml
+   d_root = "/mnt/d/7_XYZ/<that folder>"
+   win_downloads = "/mnt/c/Users/rafavcc/trial-downloads"
+   state_dir = "~/.local/share/media-organizer-trial2"
+   mac_mega = "Library/Mobile Documents/com~apple~CloudDocs/MEGA/MEGA_TRIAL"
+   mac_downloads = "Downloads/trial"
+   mega_intake = "TBC"
+   web_port = 8766
+   web_password = "trial"
    ```
 
-   Press Ctrl+C to stop it: the current item is put back in the queue (or finished) and nothing is lost. In another terminal, `python3 -m media_organizer.cli --config ~/media-organizer-trial.toml status` shows progress. Files must be at least 10 minutes old to be picked up. Afterwards check: `status` shows no unexpected errors; each converted file plays (on the iPhone and the Mac); and an original is gone only where its `_compressed` file exists. Do the four trials in this order, changing the trial config each time:
+   Must stay untouched: every other folder in `D:\7_XYZ`, the real Downloads folders and the real `MEGA` folder. This is the only trial whose `d_root` is a real folder.
 
-   1. **A copied folder** of about 10 mixed files (videos and images) at `/mnt/d/_trial/` (`d_root` as above). Copy them with Windows Explorer or `cp -r`.
-   2. **One person's folder on D:**: set `d_root = "/mnt/d/7_XYZ/<that folder>"` (the real files, so first make sure you have a backup of it).
-   3. **One MEGA subfolder with online-only files:** set `mac_mega` to that subfolder (for example `.../MEGA/MEGA_TRIAL`). Check the Mac's free disk space before and after (it should not grow by more than a few files).
-   4. **One file through each Downloads route:** put into the trial `win_downloads` (and the Mac's `Downloads/trial`) a video over 400 MB, a small video and an image, and check that the big video lands in `_trial/_TO_CONVERT` and the others in the trial MEGA `TBC` folder.
+   **Trial 3: a MEGA subfolder with online-only files.** On the Mac create the folder `MEGA/MEGA_TRIAL` (inside `Library/Mobile Documents/com~apple~CloudDocs/`) and put a few files in it that are **online-only** (copy a few photos and videos in, wait until they have synced, then right-click each and choose "Remove Download"). Note the Mac's free disk space before the trial and again after it (System Settings, General, Storage); it must not grow by more than a few files. `~/media-organizer-trial3.toml`:
+
+   ```toml
+   d_root = "/mnt/d/_trial"
+   win_downloads = "/mnt/c/Users/rafavcc/trial-downloads"
+   state_dir = "~/.local/share/media-organizer-trial3"
+   mac_mega = "Library/Mobile Documents/com~apple~CloudDocs/MEGA/MEGA_TRIAL"
+   mac_downloads = "Downloads/trial"
+   mega_intake = "TBC"
+   web_port = 8766
+   web_password = "trial"
+   ```
+
+   Must stay untouched: the rest of `MEGA` (everything outside `MEGA_TRIAL`), the Mac's real `Downloads` and everything on D: except `_trial`.
+
+   **Trial 4: one file through each Downloads route.** Put into `trial-downloads` (and the Mac's `Downloads/trial`) a video over 400 MB, a small video and an image; the big video must land in `_trial/_TO_CONVERT` and the others in the trial MEGA `TBC` folder. `~/media-organizer-trial4.toml`:
+
+   ```toml
+   d_root = "/mnt/d/_trial"
+   win_downloads = "/mnt/c/Users/rafavcc/trial-downloads"
+   state_dir = "~/.local/share/media-organizer-trial4"
+   mac_mega = "Library/Mobile Documents/com~apple~CloudDocs/MEGA/MEGA_TRIAL"
+   mac_downloads = "Downloads/trial"
+   mega_intake = "TBC"
+   web_port = 8766
+   web_password = "trial"
+   ```
+
+   Must stay untouched: the real `Downloads` folders (Windows and Mac), the real `MEGA` folder and every folder of `D:\7_XYZ` except `_trial`.
+
+   Run a trial in the foreground (use that trial's file):
+
+   ```bash
+   python3 -m media_organizer.cli --config ~/media-organizer-trial1.toml run --no-web
+   ```
+
+   Press Ctrl+C to stop it: the current item is put back in the queue (or finished) and nothing is lost. In another terminal, `python3 -m media_organizer.cli --config ~/media-organizer-trial1.toml status` shows progress. Files must be at least 10 minutes old to be picked up. Afterwards check: `status` shows no unexpected errors; each converted file plays (on the iPhone and the Mac); and an original is gone only where its `_compressed` file exists. Do the four trials in this order.
 
    Enable the real service (next step) **only after all four trials look right.** Do not run a trial and the real service on the same folders at the same time.
 
@@ -157,7 +201,7 @@ All from the repository folder:
 
 | Command | What it does |
 |---|---|
-| `media-organizer status` | Summary: first-pass progress, space freed, D: free space, queue, what is encoding now, last scan of each place, problem counts |
+| `media-organizer status` | Summary: first-pass progress, space freed, D: free space (live), queue (including items waiting for space and files still to be released from the Mac disk), what is encoding now, last scan of each place, problem counts |
 | `media-organizer status --errors` | Lists the files in error, with the error text |
 | `media-organizer status --json` | The same data as JSON |
 | `media-organizer pause` | Stop starting new items; an encode already running finishes. The service keeps running |
@@ -168,12 +212,12 @@ All from the repository folder:
 Sample `status`:
 
 ```
-First pass   D: library   412 / 1,496 videos   freed 231.4 GB   D: free 257 GB
+First pass   D: library   412 / 1,496 items   freed 231.4 GB   D: free 257 GB
              MEGA          3,120 / 9,870 files  freed  18.2 GB
-Queue        2 Downloads · 0 inbox · 6,750 MEGA · 1,084 library
+Queue        2 Downloads · 0 inbox · 6,750 MEGA · 1,084 library · 3 waiting for space · 5 to release on the Mac
 Now          encoding "clip_1080p.mp4" (2.1 GB)  37%
-Last scans   D: intake 12:00 ok · Win Downloads 12:00 ok · Mac Downloads 12:00 unreachable, retry 13:00
-Problems     3 errors · 222 no-gain · 7 low-quality      (media-organizer status --errors)
+Last scans   D: intake 12:00 ok · D: full 03:10 ok · MEGA intake 12:00 ok · MEGA full 03:40 ok · Win Downloads 12:00 ok · Mac Downloads 12:00 unreachable, retry 13:00
+Problems     3 errors · 222 no-gain · 7 low-quality · 1 changed · 2 multi-frame · 1 stuck (original not deleted)      (media-organizer status --errors)
 ```
 
 Other things you can do:
@@ -219,19 +263,20 @@ WSL shuts down by itself a little after the last terminal closes, and then the s
 
 1. In PowerShell run `wsl -l -v` and note your distribution name (for example `Ubuntu`).
 2. Open Task Scheduler, **Create Task**. Name: `Keep WSL alive`.
-3. General: choose **Run whether user is logged on or not** (so no console window appears) and tick **Hidden**. Trigger: **At log on**. Action: **Start a program**, program `wsl.exe`, arguments `-d Ubuntu --exec /bin/sleep infinity` (use your distro name).
+3. General: choose **Run only when user is logged on** and tick **Hidden** (or start the task with its window minimised). This is the first choice. The other option, **Run whether user is logged on or not**, may stop `wsl.exe` from starting at all in a non-interactive session; try it only if you want no window, and test it as described below. Trigger: **At log on**. Action: **Start a program**, program `wsl.exe`, arguments `-d Ubuntu --exec /bin/sleep infinity` (use your distro name).
 4. Conditions: untick "Start the task only if the computer is on AC power" if this is a laptop. Settings: untick "Stop the task if it runs longer than".
 
 Together with `loginctl enable-linger $USER` (from first-run step 6), the service then starts with WSL and survives closing every terminal. To test, run `wsl --shutdown`, wait a few seconds, start the task from Task Scheduler (right-click, Run) and check `systemctl --user status media-organizer` in a new Ubuntu window.
 
 ## What the statuses mean
 
-Each file the program knows has a status, and often a reason. Statuses appear in the database; the dashboard and `status` show problems (`error`, `no-gain`, `low-quality`, `changed`). Files that finish fine and whose result was delivered from Downloads are forgotten afterwards.
+Each file the program knows has a status, and often a reason. Statuses appear in the database; the dashboard and `status` show problems (`error`, `no-gain`, `low-quality`, `changed`, `multi-frame`, `stuck`). Files that finish fine and whose result was delivered from Downloads are forgotten afterwards.
 
 | Status | Reason | Meaning | What happens next |
 |---|---|---|---|
 | `queued` | | Waiting its turn (Downloads first, then the inbox folders, then MEGA, then the D: library; largest first within each) | Processed in time |
-| `queued` | `no-space` | Not enough free space on the destination drive to write the result and keep 2 GB spare | Retried later automatically; see "D: nearly full" |
+| `queued` | `no-space` | Not enough free space: the destination needs 75% of the original plus `min_free_gb`, and the work folder 2 times the original plus `min_free_gb` (checked before anything is copied; also set when writing the result finds the drive full) | Left alone for one hour, then tried again; other files go first meanwhile. `status` counts these as `waiting for space`; see "D: nearly full" |
+| `queued` | `name-taken` | Another file took the planned name at the last moment | Planned again at once with a fresh name |
 | `running` | | Being converted right now | If the service stops, it goes back to `queued` |
 | `published` | | New file written and in place; waiting to delete the original (on the Mac it waits about a minute so iCloud can catch up) | Original deleted when its checks pass |
 | `done` | | Converted, original deleted | Never touched again |
@@ -239,14 +284,16 @@ Each file the program knows has a status, and often a reason. Statuses appear in
 | `skipped` | `efficient` | A video already in AV1, or in H.265 at a bitrate that is already low | Left alone |
 | `rejected` | `no-gain` | The result was bigger than 75% of the original | Original kept; not retried unless the file or the settings change |
 | `rejected` | `low-quality` | An image's similarity score was below 0.95 | Original kept; same |
+| `rejected` | `multi-frame` | An image with several pages or frames (multi-page TIFF, multi-image HEIC, animated PNG); only one frame would survive | Original kept; not retried unless the file changes |
 | `rejected` | `changed` | The original changed while it was being processed | The file is queued again if a later scan sees it changed; the new file is kept |
 | `error` | | Something failed (the message is in `status --errors`) | Fix the cause, then `media-organizer retry-errors` |
+| `error` | `could not delete original: ...` | The new file is in place but the original could not be deleted five times (for example a read-only file); the new file is kept | Fix the cause, then `media-organizer retry-errors` finishes it. While it was trying, `status` shows it as `stuck` after an hour |
 
 ## When something goes wrong
 
 - **The service stopped, or WSL or the PC restarted mid-encode.** Nothing is lost. At the next start, files marked running go back to the queue, the temporary work folder is emptied, and the encode starts again from the beginning. A half-written `.mo-part` file left in a library is deleted by the next weekly whole-library scan once it is old. Originals are only deleted after the checks, so an interrupted file is simply tried again. If a leftover `*_compressed` file and its original both exist, the next pass handles them; do not delete either by hand while the service is running.
 - **The Mac is away (asleep, off, or off the network).** Nothing is flagged or deleted. Files that need the Mac stay `queued`, and the Mac scans are retried every hour. Work on D: continues meanwhile. When the Mac is back, it carries on by itself. If it never recovers, check `ssh mac true` first, then `mount | grep media-organizer`; a stale mount is cleaned up by the service on its next attempt.
-- **D: is nearly full.** The program will not write a result if less than the result's size plus `min_free_gb` (2 GB) would be free on the destination; the file waits as `queued` / `no-space`. Each converted file frees its original's space once the original is deleted. If D: is completely full, free a few GB by hand (for example delete files you do not need) and the queue resumes.
+- **D: (or the Mac) is nearly full.** Before copying a file the program checks that the destination has 75% of the original's size plus `min_free_gb` (2 GB) free, and that the work folder has twice the original's size plus 2 GB. If not, the file waits as `queued` / `no-space` for one hour and other files go first; `status` shows how many are `waiting for space`. Each converted file frees its original's space once the original is deleted. If the drive is completely full, free a few GB by hand (for example delete files you do not need); the waiting files are tried again within the hour. The work folder is `work` inside the state folder; it lives on the Linux disk.
 - **The database was lost or deleted** (`~/.local/share/media-organizer/organizer.db`). Restart the service (`systemctl --user restart media-organizer`); it creates a new empty database and starts over by scanning. Optionally run `media-organizer import-legacy` first to re-import the old tool's rejections. Files already ending in `_compressed` are never processed again, so nothing is compressed twice. Files that were rejected before (the original is still there) are simply tried once more and rejected again; this wastes time but is harmless. Only a conversion interrupted at exactly the wrong moment could leave one extra copy, named like `a_jpg_compressed.webp` next to `a_compressed.webp`; delete the extra by hand.
 - **An original came back after it was deleted (iCloud).** The old tool's README describes iCloud restoring files that were created and deleted within seconds. This program writes the new file with a temporary name inside the folder, renames it, and waits before deleting an original on the Mac; but the real iCloud behaviour has not been checked against this program (see "Status of this release"). If you see a file and its `_compressed` copy both back, tell the developer, and do not delete the `_compressed` one until you have checked it plays.
 - **Port already in use.** The log says "dashboard disabled: cannot bind port"; the rest of the service still works. Change `web_port` in the settings file and restart.
@@ -290,3 +337,11 @@ The automated tests only use temporary folders and tiny generated files. The pro
 4. one file through each Downloads route (small video, big video, image; Windows and Mac).
 
 Play the results on the iPhone and the Mac. The real service is enabled only after all four look right. Until then, treat the real libraries as untested, and keep the old scripts for a month.
+
+**Assumptions the trials must verify** (none of these could be checked without the real machines):
+
+- **CPU cap.** Run `systemctl --user show media-organizer -p CPUQuotaPerSecUSec` and watch Task Manager during an encode: the service should stay near 60% of the CPU. A user unit in WSL may not be able to apply the cap.
+- **Online-only detection.** On the Mac, `/usr/bin/stat -f %f <an online-only file>` must have bit `0x40000000` set (`stat -f %f` prints decimal; check with a known online-only file and a downloaded one). Use `/usr/bin/stat` because another `stat` earlier in the path would behave differently.
+- **`brctl download` and `brctl evict` while a file is still uploading.** An evict of a file that iCloud has not finished uploading may be refused; the program retries the evict every tick for 7 days (`status` shows `to release on the Mac`) but the real behaviour is unknown.
+- **The Mac sleeping in the middle of a copy.** What the sshfs mount returns then (an error that looks like a broken disk, or a hang) is unknown; the program turns such errors into "Mac away" only when a quick `ssh true` fails too.
+- **The Mac's free disk stays flat during trial 3.** Converted online-only files must be released again; if the free space shrinks, look at the `to release on the Mac` count.
