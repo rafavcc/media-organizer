@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 import time
 import unittest
@@ -7,8 +8,8 @@ from pathlib import Path
 from unittest import mock
 
 from media_organizer import db
-from media_organizer.locations import LocalLocation
-from media_organizer.scanner import refresh_folders, scan_downloads, scan_library
+from media_organizer.locations import LocalLocation, MacUnreachable
+from media_organizer.scanner import ScanResult, refresh_folders, scan_downloads, scan_library
 from tests.helpers import make_video, test_config
 
 OLD = time.time() - 3600
@@ -116,6 +117,56 @@ class LibraryScanTests(ScannerCase):
         self.assertTrue((self.cfg.d_root / "stale.mp4.mo-part").exists())
 
 
+class EmptyRootTests(ScannerCase):
+    def populate(self):
+        (self.cfg.d_root / "a").mkdir()
+        age(make_video(self.cfg.d_root / "a" / "x.mp4"))
+        scan_library(self.con, self.d, self.cfg, full=True)
+        db.set_status(self.con, self.rows()[0]["id"], "rejected", reason="no-gain")
+
+    def state(self):
+        return ([tuple(r) for r in self.rows()],
+                [tuple(r) for r in self.con.execute("SELECT * FROM folders")],
+                self.con.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0])
+
+    def test_emptied_root_is_suspect_and_keeps_everything(self):
+        self.populate()
+        before = self.state()
+        shutil.rmtree(self.cfg.d_root / "a")
+        res = scan_library(self.con, self.d, self.cfg, full=True)
+        self.assertTrue(res.suspect)
+        self.assertEqual(self.state(), before)
+
+    def test_missing_root_returns_empty_result(self):
+        self.populate()
+        before = self.state()
+        shutil.rmtree(self.cfg.d_root)
+        self.assertEqual(scan_library(self.con, self.d, self.cfg, full=True), ScanResult())
+        self.assertEqual(scan_downloads(self.con, self.d, {"d": self.d}, self.cfg), ScanResult())
+        refresh_folders(self.con, self.d)
+        self.assertEqual(self.state(), before)
+
+    def test_empty_root_without_rows_is_not_suspect(self):
+        res = scan_library(self.con, self.d, self.cfg, full=True)
+        self.assertFalse(res.suspect)
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0], 1)
+
+    def test_empty_sub_with_rows_elsewhere_is_not_suspect(self):
+        self.populate()
+        (self.cfg.d_root / "b").mkdir()
+        res = scan_library(self.con, self.d, self.cfg, sub="b", full=True)
+        self.assertFalse(res.suspect)
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_stale_part_alone_is_not_an_empty_walk(self):
+        self.populate()
+        shutil.rmtree(self.cfg.d_root / "a")
+        write(self.cfg.d_root / "stale.mp4.mo-part", mtime=time.time() - 2 * 86400)
+        res = scan_library(self.con, self.d, self.cfg, full=True)
+        self.assertFalse(res.suspect)
+        self.assertEqual(self.rows(), [])
+
+
 class DownloadsTests(ScannerCase):
     def locs(self):
         return {"d": self.d, "win_dl": self.dl}
@@ -171,6 +222,80 @@ class DownloadsTests(ScannerCase):
             res = scan_downloads(self.con, self.dl, self.locs(), cfg)
         self.assertTrue(src.exists())
         self.assertEqual(res.waiting, 1)
+
+    def big_pair(self):
+        cfg = replace(self.cfg, size_threshold_mb=1)
+        a = write(cfg.win_downloads / "a.mp4", data=b"y" * (2 * MIB))
+        b = write(cfg.win_downloads / "b.mp4", data=b"z" * (2 * MIB))
+        return cfg, a, b
+
+    def test_source_rewritten_during_copy_is_kept(self):
+        cfg = replace(self.cfg, size_threshold_mb=1)
+        src = write(cfg.win_downloads / "big.mp4", data=b"y" * (2 * MIB))
+        real = self.d.publish
+
+        def publish_then_touch(*args, **kw):
+            out = real(*args, **kw)
+            age(src, OLD + 100)
+            return out
+
+        with mock.patch.object(self.d, "publish", side_effect=publish_then_touch):
+            res = scan_downloads(self.con, self.dl, self.locs(), cfg)
+        self.assertTrue(src.exists())
+        self.assertEqual(list((cfg.d_root / "_TO_CONVERT").iterdir()), [])
+        self.assertEqual((res.waiting, res.moved), (1, 0))
+
+    def test_returned_size_mismatch_keeps_source(self):
+        cfg = replace(self.cfg, size_threshold_mb=1)
+        src = write(cfg.win_downloads / "big.mp4", data=b"y" * (2 * MIB))
+        real = self.d.publish
+        with mock.patch.object(self.d, "publish",
+                               side_effect=lambda *a, **k: real(*a, **k) + 1):
+            res = scan_downloads(self.con, self.dl, self.locs(), cfg)
+        self.assertTrue(src.exists())
+        self.assertEqual(list((cfg.d_root / "_TO_CONVERT").iterdir()), [])
+        self.assertEqual((res.waiting, res.moved), (1, 0))
+
+    def test_publish_oserror_skips_that_file_only(self):
+        cfg, a, b = self.big_pair()
+        real = self.d.publish
+        calls = []
+
+        def flaky(*args, **kw):
+            calls.append(1)
+            if len(calls) == 1:
+                raise OSError("source grew")
+            return real(*args, **kw)
+
+        with mock.patch.object(self.d, "publish", side_effect=flaky):
+            res = scan_downloads(self.con, self.dl, self.locs(), cfg)
+        self.assertTrue(a.exists())
+        self.assertFalse(b.exists())
+        self.assertEqual([p.name for p in (cfg.d_root / "_TO_CONVERT").iterdir()], ["b.mp4"])
+        self.assertEqual((res.waiting, res.moved), (1, 1))
+
+    def test_publish_oserror_removes_leftovers(self):
+        cfg = replace(self.cfg, size_threshold_mb=1)
+        src = write(cfg.win_downloads / "big.mp4", data=b"y" * (2 * MIB))
+
+        def leave_part(src_path, target, *a, **k):
+            part = cfg.d_root / (target + ".mo-part")
+            part.parent.mkdir(parents=True, exist_ok=True)
+            part.write_bytes(b"half")
+            raise OSError("boom")
+
+        with mock.patch.object(self.d, "publish", side_effect=leave_part):
+            res = scan_downloads(self.con, self.dl, self.locs(), cfg)
+        self.assertTrue(src.exists())
+        self.assertEqual(list((cfg.d_root / "_TO_CONVERT").iterdir()), [])
+        self.assertEqual(res.waiting, 1)
+
+    def test_mac_unreachable_still_propagates(self):
+        cfg = replace(self.cfg, size_threshold_mb=1)
+        write(cfg.win_downloads / "big.mp4", data=b"y" * (2 * MIB))
+        with mock.patch.object(self.d, "publish", side_effect=MacUnreachable("down")):
+            with self.assertRaises(MacUnreachable):
+                scan_downloads(self.con, self.dl, self.locs(), cfg)
 
 
 class RefreshFoldersTests(ScannerCase):

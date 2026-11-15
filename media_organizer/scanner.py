@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from . import db, rules
 from .config import Config
-from .locations import Location, NoSpace
+from .locations import PART_SUFFIX, Location, NoSpace
 from .probe import probe_video
 
 PRIORITY = {"downloads": 0, "intake": 1, "mega": 2, "d": 3}
@@ -23,6 +23,7 @@ class ScanResult:
     adopted: int = 0
     moved: int = 0
     waiting: int = 0
+    suspect: bool = False  # full scan walked nothing although rows exist: left untouched
 
 
 def _intake_folder(loc: Location, cfg: Config) -> str | None:
@@ -49,15 +50,31 @@ def _skip_if_efficient(con, loc: Location, cfg: Config, relpath: str) -> bool:
     return True
 
 
+def _has_rows(con, location: str, under: str) -> bool:
+    if not under:
+        return con.execute("SELECT 1 FROM items WHERE location=? LIMIT 1",
+                           (location,)).fetchone() is not None
+    return con.execute("SELECT 1 FROM items WHERE location=? AND (relpath=? OR "
+                       "substr(relpath, 1, ?)=?) LIMIT 1",
+                       (location, under, len(under) + 1, under + "/")).fetchone() is not None
+
+
 def scan_library(con, loc: Location, cfg: Config, *, sub: str = "", full: bool) -> ScanResult:
     res = ScanResult()
+    if not loc.root.exists():
+        return res
+    entries = 0
     intake = _intake_folder(loc, cfg)
     seen: set[str] = set()
     for entry in loc.walk(sub):
+        entries += 1
         name = posixpath.basename(entry.relpath)
         if full and name.endswith(".mo-part"):
             if loc.now() - entry.mtime > STALE_PART_S:
-                loc.delete(entry.relpath)
+                try:
+                    loc.delete(entry.relpath)
+                except FileNotFoundError:
+                    pass
             continue
         if not rules.is_candidate(name):
             continue
@@ -84,6 +101,9 @@ def scan_library(con, loc: Location, cfg: Config, *, sub: str = "", full: bool) 
         if kind == "video" and not loc.is_mac and _skip_if_efficient(con, loc, cfg, entry.relpath):
             continue
         res.queued += 1
+    if full and entries == 0 and _has_rows(con, loc.name, sub):
+        res.suspect = True  # an unmounted drive looks like an empty folder: prune nothing
+        return res
     if full:
         db.prune_missing(con, location=loc.name, under=sub, seen=seen)
         refresh_folders(con, loc)
@@ -92,6 +112,8 @@ def scan_library(con, loc: Location, cfg: Config, *, sub: str = "", full: bool) 
 
 def scan_downloads(con, loc: Location, locs: dict[str, Location], cfg: Config) -> ScanResult:
     res = ScanResult()
+    if not loc.root.exists():
+        return res
     dest = locs["d"]
     for entry in loc.walk(recursive=False):
         route = rules.route_download(entry.relpath, entry.size, cfg)
@@ -125,15 +147,31 @@ def _move_to_d(loc: Location, dest: Location, entry, cfg: Config, res: ScanResul
     except NoSpace:
         res.waiting += 1
         return
-    if written != entry.size:  # the source changed while it was copied; try again next scan
-        dest.delete(target)
+    except OSError as e:  # e.g. the source grew during the copy; try again next scan
+        if not isinstance(e, FileExistsError):  # that file is somebody else's
+            _discard(dest, target)
+        _discard(dest, target + PART_SUFFIX)
+        res.waiting += 1
+        return
+    now = loc.stat(entry.relpath)
+    if written != entry.size or now is None or (now.size, now.mtime) != (entry.size, entry.mtime):
+        _discard(dest, target)  # the source changed after the walk; try again next scan
         res.waiting += 1
         return
     loc.delete(entry.relpath)
     res.moved += 1
 
 
+def _discard(loc: Location, relpath: str) -> None:
+    try:
+        loc.delete(relpath)
+    except FileNotFoundError:
+        pass
+
+
 def refresh_folders(con, loc: Location) -> None:
+    if not loc.root.exists():
+        return
     finished = {r["relpath"] for r in con.execute(
         "SELECT relpath FROM items WHERE location=? AND status IN ('done','skipped','rejected')",
         (loc.name,))}
