@@ -1,0 +1,70 @@
+import unittest
+
+from media_organizer.config import Config
+from media_organizer.rules import (
+    bits_per_pixel, final_name, free_name, is_candidate, kind_of,
+    route_download, video_decision,
+)
+
+CFG = Config()
+MB = 1024 * 1024
+
+
+class KindAndCandidateTests(unittest.TestCase):
+    def test_kind_of(self):
+        self.assertEqual(kind_of("A.MKV"), "video")
+        self.assertEqual(kind_of("a.HEIC"), "image")
+        self.assertIsNone(kind_of("a.webp"))
+        self.assertIsNone(kind_of("a.txt"))
+
+    def test_is_candidate(self):
+        self.assertFalse(is_candidate("x_compressed.mp4"))
+        self.assertFalse(is_candidate("x_COMPRESSED.mp4"))
+        self.assertFalse(is_candidate(".x.mp4"))
+        self.assertFalse(is_candidate("x.mp4.part"))
+        self.assertTrue(is_candidate("x.mp4"))
+
+
+class VideoDecisionTests(unittest.TestCase):
+    def test_decisions(self):
+        self.assertEqual(video_decision("h264", None, CFG), "encode")
+        self.assertEqual(video_decision("av1", 9.0, CFG), "efficient")
+        self.assertEqual(video_decision("hevc", 0.05, CFG), "efficient")
+        self.assertEqual(video_decision("hevc", 0.071, CFG), "encode")
+        self.assertEqual(video_decision("hevc", None, CFG), "efficient")
+
+    def test_bits_per_pixel(self):
+        self.assertAlmostEqual(bits_per_pixel(8_000_000, 1920, 1080, 30.0), 0.1286, places=3)
+        self.assertIsNone(bits_per_pixel(None, 1920, 1080, 30.0))
+        self.assertIsNone(bits_per_pixel(8_000_000, 0, 1080, 30.0))
+        self.assertIsNone(bits_per_pixel(8_000_000, 1920, 0, 30.0))
+        self.assertIsNone(bits_per_pixel(8_000_000, 1920, 1080, 0))
+
+
+class RouteDownloadTests(unittest.TestCase):
+    def test_routes(self):
+        self.assertEqual(route_download("a.mp4", 400 * MB + 1, CFG), "d")
+        self.assertEqual(route_download("a.mp4", 400 * MB, CFG), "mega")
+        self.assertEqual(route_download("a.png", 900 * MB, CFG), "mega")
+        self.assertEqual(route_download("a.webp", 1, CFG), "mega")
+        self.assertIsNone(route_download("a.pdf", 1, CFG))
+        self.assertIsNone(route_download("a.mp4.crdownload", 1, CFG))
+        self.assertIsNone(route_download(".a.mp4", 1, CFG))
+
+
+class NamingTests(unittest.TestCase):
+    def test_final_name(self):
+        self.assertEqual(final_name("clip.mov", ".mp4", lambda n: False), "clip_compressed.mp4")
+        taken = {"clip_compressed.mp4"}
+        self.assertEqual(final_name("clip.mov", ".mp4", taken.__contains__), "clip_mov_compressed.mp4")
+        taken.add("clip_mov_compressed.mp4")
+        self.assertEqual(final_name("clip.mov", ".mp4", taken.__contains__), "clip_mov2_compressed.mp4")
+
+    def test_free_name(self):
+        taken = {"a.mp4", "a (1).mp4"}
+        self.assertEqual(free_name("a.mp4", taken.__contains__), "a (2).mp4")
+        self.assertEqual(free_name("b.mp4", taken.__contains__), "b.mp4")
+
+
+if __name__ == "__main__":
+    unittest.main()
