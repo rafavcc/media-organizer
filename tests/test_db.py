@@ -70,6 +70,17 @@ class UpsertTests(DbTestCase):
         self.assertEqual(add(self.con, "a.mp4", mtime=2.0), "requeued")
         self.assertEqual(row(self.con, "a.mp4")["mtime"], 2.0)
 
+    def test_queued_changed_file_drops_recorded_publish(self):
+        add(self.con, "a.mp4")
+        item = db.claim_next(self.con, kind="video", exclude_locations=())
+        db.set_status(self.con, item["id"], "queued", final_relpath="a_compressed.mp4",
+                      final_size=5)
+        self.assertEqual(add(self.con, "a.mp4"), "known")
+        self.assertEqual(row(self.con, "a.mp4")["final_relpath"], "a_compressed.mp4")
+        self.assertEqual(add(self.con, "a.mp4", size=11), "requeued")
+        r = row(self.con, "a.mp4")
+        self.assertEqual((r["final_relpath"], r["final_size"]), (None, None))
+
     def test_running_and_published_left_alone(self):
         add(self.con, "a.mp4")
         item = db.claim_next(self.con, kind="video", exclude_locations=())
@@ -119,6 +130,14 @@ class ClaimTests(DbTestCase):
         self.assertEqual(db.reset_running(self.con), 1)
         self.assertEqual(row(self.con, "a")["status"], "queued")
 
+    def test_reset_running_keeps_recorded_publish(self):
+        add(self.con, "a")
+        item = db.claim_next(self.con, kind="video", exclude_locations=())
+        db.set_status(self.con, item["id"], "running", final_relpath="a_c", final_size=4)
+        db.reset_running(self.con)
+        r = row(self.con, "a")
+        self.assertEqual((r["status"], r["final_relpath"], r["final_size"]), ("queued", "a_c", 4))
+
     def test_published_survives_restart(self):
         add(self.con, "a")
         item = db.claim_next(self.con, kind="video", exclude_locations=())
@@ -146,6 +165,27 @@ class ClaimTests(DbTestCase):
         add(self.con, "a")
         db.delete_item(self.con, row(self.con, "a")["id"])
         self.assertIsNone(row(self.con, "a"))
+
+
+class RenameTests(DbTestCase):
+    def test_rename_replaces_stale_row_at_target(self):
+        add(self.con, "old/a.mp4")
+        add(self.con, "new/a.mp4", size=99)
+        add(self.con, "new/a.mp4", location="mega", size=7)
+        cur = row(self.con, "old/a.mp4")
+        db.set_status(self.con, cur["id"], "done", reason="r", error=None)
+        db.rename_item(self.con, cur["id"], "new/a.mp4")
+        r = row(self.con, "new/a.mp4")
+        self.assertEqual((r["id"], r["status"], r["reason"], r["size"]), (cur["id"], "done", "r", 10))
+        self.assertIsNone(row(self.con, "old/a.mp4"))
+        self.assertEqual(row(self.con, "new/a.mp4", location="mega")["size"], 7)
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM items").fetchone()[0], 2)
+
+    def test_rename_without_conflict(self):
+        add(self.con, "a")
+        cur = row(self.con, "a")
+        db.rename_item(self.con, cur["id"], "b")
+        self.assertEqual(row(self.con, "b")["id"], cur["id"])
 
 
 class AdoptAndPruneTests(DbTestCase):

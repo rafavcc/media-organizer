@@ -6,7 +6,6 @@ the expected size and the original still has the size and mtime recorded when it
 from __future__ import annotations
 
 import logging
-import posixpath
 import shutil
 import sqlite3
 import tempfile
@@ -21,6 +20,8 @@ from .locations import Location, MacUnreachable, NoSpace
 
 log = logging.getLogger(__name__)
 _finalize_lock = threading.Lock()
+_post_step_lock = threading.Lock()
+_POST_STEP_STATUSES = ("done", "skipped", "rejected")
 _REJECT_STATUSES = {"efficient": "skipped", "no-gain": "rejected", "low-quality": "rejected",
                     "error": "error"}
 
@@ -46,7 +47,8 @@ def process_item(con, item: sqlite3.Row, locs: dict[str, Location], cfg: Config,
         db.set_status(con, item["id"], "queued")
         raise
     except NoSpace:
-        db.set_status(con, item["id"], "queued", reason="no-space")
+        db.set_status(con, item["id"], "queued", reason="no-space", final_relpath=None,
+                      final_size=None)
         return "queued"
     except Exception as e:
         log.exception("processing %s failed", item["relpath"])
@@ -63,7 +65,8 @@ def _check_source(con, item, loc: Location) -> str | None:
         db.delete_item(con, item["id"])
         return "gone"
     if entry.size != item["size"] or entry.mtime != item["mtime"]:
-        db.set_status(con, item["id"], "queued", size=entry.size, mtime=entry.mtime)
+        db.set_status(con, item["id"], "queued", size=entry.size, mtime=entry.mtime,
+                      final_relpath=None, final_size=None)  # a landed copy is of the old content
         return "queued"
     return None
 
@@ -80,7 +83,16 @@ def _process_library(con, item, locs, cfg, tmp, on_progress) -> str:
     early = _check_source(con, item, loc)
     if early:
         return early
-    online_only = loc.is_online_only(item["relpath"])
+    delay = cfg.mac_delete_delay_s if loc.is_mac else 0
+    if item["final_relpath"] and item["final_size"] is not None:
+        landed = loc.stat(item["final_relpath"])
+        if landed is not None and landed.size == item["final_size"]:
+            # an earlier attempt published this file but was cut off before recording it
+            db.set_status(con, item["id"], "published", not_before=loc.now() + delay)
+            return _after_published(con, item, locs, loc, cfg)
+        db.set_status(con, item["id"], "running", final_relpath=None, final_size=None)
+    # once online-only, always: a retry finds the file already downloaded by the first fetch
+    online_only = bool(item["was_online_only"]) or loc.is_online_only(item["relpath"])
     db.set_status(con, item["id"], "running", was_online_only=int(online_only))
     local, name = _fetch(loc, item, tmp)
     outcome = convert(local, name, item["size"], tmp, cfg, on_progress)
@@ -99,34 +111,72 @@ def _process_library(con, item, locs, cfg, tmp, on_progress) -> str:
     final = rules.final_name(name, rules.out_ext(name),
                              lambda n: loc.exists(_join(folder, n)))
     final_rel = _join(folder, final)
+    expected = outcome.out.stat().st_size
+    # record the plan first: if the publish lands but is not recorded, the retry finds it
+    db.set_status(con, item["id"], "running", final_relpath=final_rel, final_size=expected)
     size = loc.publish(outcome.out, final_rel, mtime=item["mtime"],
                        min_free=int(cfg.min_free_gb * 1024 ** 3))
-    delay = cfg.mac_delete_delay_s if loc.is_mac else 0
     db.set_status(con, item["id"], "published", final_relpath=final_rel, final_size=size,
                   not_before=loc.now() + delay)
+    return _after_published(con, item, locs, loc, cfg)
+
+
+def _after_published(con, item, locs, loc: Location, cfg: Config) -> str:
     if not loc.is_mac:
-        finalize_published(con, locs, cfg)
+        _finalize(con, locs)
     status = con.execute("SELECT status FROM items WHERE id=?", (item["id"],)).fetchone()["status"]
     return _intake_post_step(con, item, loc, cfg, status)
 
 
+def _under(relpath: str, folder: str) -> bool:
+    return relpath.startswith(folder + "/")
+
+
 def _intake_post_step(con, item, loc: Location, cfg: Config, status: str) -> str:
-    if loc.name != "d" or item["source"] != "intake" or status not in ("done", "skipped",
-                                                                          "rejected"):
+    if loc.name != "d" or item["source"] != "intake" or status not in _POST_STEP_STATUSES:
         return status
-    row = con.execute("SELECT * FROM items WHERE id=?", (item["id"],)).fetchone()
-    current = row["final_relpath"] if status == "done" and row["final_relpath"] else row["relpath"]
-    name = _split(current)[1]
-    target = rules.free_name(name, lambda n: loc.exists(_join(cfg.d_converted, n)))
-    new_rel = _join(cfg.d_converted, target)
-    loc.move_within(current, new_rel)
     try:
-        with db._tx(con):
-            con.execute("UPDATE items SET relpath=? WHERE id=?", (new_rel, item["id"]))
-    except sqlite3.IntegrityError:
-        db.delete_item(con, item["id"])  # a stale row already owns the new path
-    db.meta_set(con, "sorter_dirty", "1")
+        _move_to_converted(con, item["id"], loc, cfg)
+    except Exception:
+        # never change the item's status: the original may already be deleted
+        log.exception("moving the result of %s to %s failed", item["relpath"], cfg.d_converted)
+        row = con.execute("SELECT status FROM items WHERE id=?", (item["id"],)).fetchone()
+        if row is not None:
+            db.set_status(con, item["id"], row["status"], reason="post-step-failed")
     return status
+
+
+def _move_to_converted(con, item_id: int, loc: Location, cfg: Config) -> None:
+    with _post_step_lock:
+        row = con.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+        if row is None or not _under(row["relpath"], cfg.d_intake):
+            return  # already moved
+        current = (row["final_relpath"] if row["status"] == "done" and row["final_relpath"]
+                   else row["relpath"])
+        name = _split(current)[1]
+        target = rules.free_name(name, lambda n: loc.exists(_join(cfg.d_converted, n)))
+        new_rel = _join(cfg.d_converted, target)
+        loc.move_within(current, new_rel)
+        db.rename_item(con, item_id, new_rel)
+        if row["reason"] == "post-step-failed":
+            db.set_status(con, item_id, row["status"], reason=None)
+        db.meta_set(con, "sorter_dirty", "1")
+
+
+def _retry_post_steps(con, locs: dict[str, Location], cfg: Config) -> None:
+    loc = locs.get("d")
+    if loc is None:
+        return
+    marks = ",".join("?" * len(_POST_STEP_STATUSES))
+    rows = con.execute(f"SELECT * FROM items WHERE location='d' AND source='intake' "
+                       f"AND status IN ({marks})", _POST_STEP_STATUSES).fetchall()
+    for row in rows:
+        if not _under(row["relpath"], cfg.d_intake):
+            continue
+        current = (row["final_relpath"] if row["status"] == "done" and row["final_relpath"]
+                   else row["relpath"])
+        if loc.exists(current):
+            _intake_post_step(con, row, loc, cfg, row["status"])
 
 
 def _process_download(con, item, locs, cfg, tmp, on_progress) -> str:
@@ -138,6 +188,14 @@ def _process_download(con, item, locs, cfg, tmp, on_progress) -> str:
     if not dest.reachable():
         db.set_status(con, item["id"], "queued")
         raise MacUnreachable(f"{dest.name} is not reachable")
+    if item["final_relpath"] and item["final_size"] is not None:
+        landed = dest.stat(item["final_relpath"])
+        if landed is not None and landed.size == item["final_size"]:
+            # an earlier attempt published this copy but was cut off before the source was deleted
+            stem = Path(item["final_relpath"]).stem.lower()
+            return _finish_download(con, item, src_loc, dest, item["final_relpath"],
+                                    landed.size, converted=stem.endswith("_compressed"))
+        db.set_status(con, item["id"], "running", final_relpath=None, final_size=None)
     local, name = _fetch(src_loc, item, tmp)
     taken = lambda n: dest.exists(_join(item["dest_dir"], n))
     converted = False
@@ -155,13 +213,20 @@ def _process_download(con, item, locs, cfg, tmp, on_progress) -> str:
         out_name = rules.free_name(name, taken)
     dest_rel = _join(item["dest_dir"], out_name)
     expected = payload.stat().st_size
+    db.set_status(con, item["id"], "running", final_relpath=dest_rel, final_size=expected)
     size = dest.publish(payload, dest_rel, mtime=item["mtime"],
                         min_free=int(cfg.min_free_gb * 1024 ** 3))
     landed = dest.stat(dest_rel)
     if size != expected or landed is None or landed.size != expected:
         raise OSError(f"published {dest_rel} does not have the expected size {expected}")
-    now = src_loc.stat(item["relpath"])
-    if now is None or (now.size, now.mtime) != (item["size"], item["mtime"]):
+    return _finish_download(con, item, src_loc, dest, dest_rel, size, converted)
+
+
+def _finish_download(con, item, src_loc: Location, dest: Location, dest_rel: str, size: int,
+                     converted: bool) -> str:
+    """The copy is at its final path with the expected size; delete the source if unchanged."""
+    current = src_loc.stat(item["relpath"])
+    if current is None or (current.size, current.mtime) != (item["size"], item["mtime"]):
         db.set_status(con, item["id"], "rejected", reason="changed", finished_at=src_loc.now())
         return "rejected"
     src_loc.delete(item["relpath"])
@@ -173,7 +238,14 @@ def _process_download(con, item, locs, cfg, tmp, on_progress) -> str:
 
 
 def finalize_published(con, locs: dict[str, Location], cfg: Config) -> int:
-    """Delete the original of every published row that is due and verified. Returns the count."""
+    """Delete the original of every published row that is due and verified; also retry any
+    intake post-step that failed earlier. Returns the number of originals deleted."""
+    deleted = _finalize(con, locs)
+    _retry_post_steps(con, locs, cfg)
+    return deleted
+
+
+def _finalize(con, locs: dict[str, Location]) -> int:
     deleted = 0
     for loc in locs.values():
         due = [r for r in db.due_published(con, loc.now()) if r["location"] == loc.name]

@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from media_organizer import db, worker
 from media_organizer.locations import LocalLocation, MacUnreachable, NoSpace
@@ -19,6 +20,7 @@ class FakeMac(LocalLocation):
         self.reachable_flag = True
         self.clock = None
         self.publish_error = None
+        self.error_after_publish = None
 
     def now(self):
         return super().now() if self.clock is None else self.clock
@@ -36,7 +38,10 @@ class FakeMac(LocalLocation):
     def publish(self, src, relpath, mtime, min_free):
         if self.publish_error is not None:
             raise self.publish_error
-        return super().publish(src, relpath, mtime, min_free)
+        size = super().publish(src, relpath, mtime, min_free)
+        if self.error_after_publish is not None:
+            raise self.error_after_publish
+        return size
 
 
 class Base(unittest.TestCase):
@@ -337,6 +342,176 @@ class DownloadsTests(Base):
         self.assertTrue((self.dl.root / "pic.png").exists())
         r = self.row(item)
         self.assertEqual((r["status"], r["reason"]), ("rejected", "changed"))
+
+
+class RecoveryTests(Base):
+    def forbid_convert(self):
+        p = mock.patch("media_organizer.worker.convert",
+                       side_effect=AssertionError("must not re-encode"))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def requeue_claim(self, item):
+        return db.claim_next(self.con, kind=item["kind"], exclude_locations=())
+
+    def test_library_landed_publish_not_reencoded(self):
+        p = make_video(self.mega.root / "x.mp4")
+        item = self.add(self.mega, "x.mp4")
+        self.mega.error_after_publish = MacUnreachable("dropped after rename")
+        with self.assertRaises(MacUnreachable):
+            self.run_item(item)
+        r = self.row(item)
+        self.assertEqual((r["status"], r["final_relpath"]), ("queued", "x_compressed.mp4"))
+        self.assertEqual(r["final_size"], (self.mega.root / "x_compressed.mp4").stat().st_size)
+        self.mega.error_after_publish = None
+        self.forbid_convert()
+        item = self.requeue_claim(item)
+        self.assertEqual(self.run_item(item), "published")
+        self.assertEqual(sorted(f.name for f in self.mega.root.iterdir()),
+                         ["x.mp4", "x_compressed.mp4"])
+        self.mega.clock = self.row(item)["not_before"] + 1
+        self.assertEqual(worker.finalize_published(self.con, self.locs, self.cfg), 1)
+        self.assertFalse(p.exists())
+        self.assertEqual(self.row(item)["status"], "done")
+        self.assertEqual(len(self.conversions()), 1)
+
+    def test_reset_running_keeps_recorded_publish(self):
+        make_video(self.mega.root / "x.mp4")
+        item = self.add(self.mega, "x.mp4")
+        self.mega.error_after_publish = MacUnreachable("x")
+        with self.assertRaises(MacUnreachable):
+            self.run_item(item)
+        db.set_status(self.con, item["id"], "running")
+        db.reset_running(self.con)
+        self.assertEqual(self.row(item)["final_relpath"], "x_compressed.mp4")
+
+    def test_downloads_landed_publish_not_duplicated(self):
+        make_image(self.dl.root / "pic.png")
+        item = self.add(self.dl, "pic.png", kind="image", source="downloads",
+                        dest_location="mega", dest_dir="TBC")
+        self.mega.error_after_publish = MacUnreachable("dropped after rename")
+        with self.assertRaises(MacUnreachable):
+            self.run_item(item)
+        r = self.row(item)
+        self.assertEqual((r["status"], r["final_relpath"]), ("queued", "TBC/pic_compressed.webp"))
+        self.mega.error_after_publish = None
+        self.forbid_convert()
+        item = self.requeue_claim(item)
+        self.assertEqual(self.run_item(item), "done")
+        self.assertEqual([f.name for f in (self.mega.root / "TBC").iterdir()],
+                         ["pic_compressed.webp"])
+        self.assertFalse((self.dl.root / "pic.png").exists())
+        self.assertIsNone(self.row(item))
+        self.assertEqual(len(self.conversions()), 1)
+
+    def test_downloads_landed_but_source_changed_keeps_source(self):
+        make_image(self.dl.root / "pic.png")
+        item = self.add(self.dl, "pic.png", kind="image", source="downloads",
+                        dest_location="mega", dest_dir="TBC")
+        self.mega.error_after_publish = MacUnreachable("x")
+        with self.assertRaises(MacUnreachable):
+            self.run_item(item)
+        with open(self.dl.root / "pic.png", "ab") as f:
+            f.write(b"edit")
+        self.mega.error_after_publish = None
+        item = self.requeue_claim(item)
+        self.assertEqual(self.run_item(item), "queued")
+        self.assertTrue((self.dl.root / "pic.png").exists())
+        r = self.row(item)
+        self.assertEqual((r["final_relpath"], r["final_size"]), (None, None))
+
+    def test_library_changed_original_drops_recorded_publish(self):
+        p = make_video(self.mega.root / "x.mp4")
+        item = self.add(self.mega, "x.mp4")
+        self.mega.error_after_publish = MacUnreachable("x")
+        with self.assertRaises(MacUnreachable):
+            self.run_item(item)
+        with open(p, "ab") as f:
+            f.write(b"edit")
+        self.mega.error_after_publish = None
+        item = self.requeue_claim(item)
+        self.assertEqual(self.run_item(item), "queued")
+        r = self.row(item)
+        self.assertEqual((r["final_relpath"], r["final_size"]), (None, None))
+
+    def test_recorded_final_missing_processed_normally(self):
+        make_video(self.mega.root / "x.mp4")
+        item = self.add(self.mega, "x.mp4")
+        db.set_status(self.con, item["id"], "running", final_relpath="x_compressed.mp4",
+                      final_size=1234)
+        item = self.row(item)
+        self.assertEqual(self.run_item(item), "published")
+        r = self.row(item)
+        self.assertEqual(r["final_relpath"], "x_compressed.mp4")
+        self.assertEqual(r["final_size"], (self.mega.root / "x_compressed.mp4").stat().st_size)
+
+    def test_recorded_final_wrong_size_processed_normally(self):
+        make_video(self.mega.root / "x.mp4")
+        (self.mega.root / "x_compressed.mp4").write_bytes(b"other")
+        item = self.add(self.mega, "x.mp4")
+        db.set_status(self.con, item["id"], "running", final_relpath="x_compressed.mp4",
+                      final_size=1234)
+        item = self.row(item)
+        self.assertEqual(self.run_item(item), "published")
+        self.assertEqual(self.row(item)["final_relpath"], "x_mp4_compressed.mp4")
+
+    def test_no_space_clears_recorded_publish(self):
+        make_video(self.mega.root / "x.mp4")
+        item = self.add(self.mega, "x.mp4")
+        self.mega.publish_error = NoSpace("full")
+        self.run_item(item)
+        r = self.row(item)
+        self.assertEqual((r["final_relpath"], r["final_size"]), (None, None))
+
+    def test_online_only_flag_sticks_across_retry(self):
+        make_video(self.mega.root / "x.mp4")
+        item = self.add(self.mega, "x.mp4")
+        db.set_status(self.con, item["id"], "running", was_online_only=1)
+        item = self.row(item)
+        self.assertEqual(self.run_item(item), "published")
+        self.assertEqual(self.row(item)["was_online_only"], 1)
+        self.mega.clock = self.row(item)["not_before"] + 1
+        worker.finalize_published(self.con, self.locs, self.cfg)
+        self.assertEqual(self.mega.evicted, ["x_compressed.mp4"])
+
+    def test_intake_stale_row_at_target_replaced(self):
+        (self.d.root / "_TO_CONVERT").mkdir()
+        make_video(self.d.root / "_TO_CONVERT" / "v.mp4")
+        item = self.add(self.d, "_TO_CONVERT/v.mp4", source="intake")
+        db.upsert_candidate(self.con, location="d", relpath="_CONVERTED/v_compressed.mp4",
+                            size=1, mtime=1.0, kind="video", source="intake", priority=1,
+                            settings="s")
+        self.assertEqual(self.run_item(item), "done")
+        rows = self.con.execute("SELECT * FROM items WHERE location='d'").fetchall()
+        self.assertEqual([(r["id"], r["relpath"], r["status"]) for r in rows],
+                         [(item["id"], "_CONVERTED/v_compressed.mp4", "done")])
+
+    def test_post_step_failure_keeps_status_and_is_retried(self):
+        (self.d.root / "_TO_CONVERT").mkdir()
+        make_video(self.d.root / "_TO_CONVERT" / "v.mp4")
+        item = self.add(self.d, "_TO_CONVERT/v.mp4", source="intake")
+        real = self.d.move_within
+        calls = []
+
+        def flaky(rel, new):
+            calls.append(rel)
+            if len(calls) == 1:
+                raise OSError("disk hiccup")
+            real(rel, new)
+        self.d.move_within = flaky
+        with self.assertLogs("media_organizer.worker", logging.ERROR):
+            self.assertEqual(self.run_item(item), "done")
+        r = self.row(item)
+        self.assertEqual((r["status"], r["reason"]), ("done", "post-step-failed"))
+        self.assertTrue((self.d.root / "_TO_CONVERT" / "v_compressed.mp4").exists())
+        self.assertIsNone(db.meta_get(self.con, "sorter_dirty"))
+        worker.finalize_published(self.con, self.locs, self.cfg)
+        self.assertTrue((self.d.root / "_CONVERTED" / "v_compressed.mp4").exists())
+        self.assertEqual(list((self.d.root / "_TO_CONVERT").iterdir()), [])
+        r = self.row(item)
+        self.assertEqual((r["status"], r["relpath"]), ("done", "_CONVERTED/v_compressed.mp4"))
+        self.assertEqual(db.meta_get(self.con, "sorter_dirty"), "1")
+        self.assertEqual(len(calls), 2)
 
 
 if __name__ == "__main__":

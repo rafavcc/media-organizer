@@ -78,7 +78,9 @@ def upsert_candidate(con, *, location, relpath, size, mtime, kind, source, prior
         if status == "queued":
             if same_file:
                 return "known"
-            con.execute("UPDATE items SET size=?, mtime=? WHERE id=?", (size, mtime, row["id"]))
+            # the file changed, so a recorded publish belongs to the old content
+            con.execute("UPDATE items SET size=?, mtime=?, final_relpath=NULL, final_size=NULL "
+                        "WHERE id=?", (size, mtime, row["id"]))
             return "requeued"
         if same_file and (status not in ("skipped", "rejected") or row["settings"] == settings):
             return "known"
@@ -107,6 +109,17 @@ def adopt_moved(con, *, location, relpath, size, mtime, exists: Callable[[str], 
             return False  # the new path already has its own row
         return True
     return False
+
+
+def rename_item(con, item_id: int, new_relpath: str) -> None:
+    """Point a row at a new path; any other row of the same location holding it is stale."""
+    with _tx(con):
+        loc = con.execute("SELECT location FROM items WHERE id=?", (item_id,)).fetchone()
+        if loc is None:
+            return
+        con.execute("DELETE FROM items WHERE location=? AND relpath=? AND id!=?",
+                    (loc["location"], new_relpath, item_id))
+        con.execute("UPDATE items SET relpath=? WHERE id=?", (new_relpath, item_id))
 
 
 def claim_next(con, *, kind: str, exclude_locations: Collection[str]):
