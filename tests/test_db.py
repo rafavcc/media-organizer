@@ -167,6 +167,27 @@ class ClaimTests(DbTestCase):
         self.assertIsNone(row(self.con, "a"))
 
 
+class PlannedNamesTests(DbTestCase):
+    def test_planned_names(self):
+        for rel, status in (("a", "queued"), ("b", "running"), ("c", "published"),
+                            ("d", "done"), ("e", "error")):
+            add(self.con, rel)
+            r = row(self.con, rel)
+            db.set_status(self.con, r["id"], status, final_relpath=f"out/{rel}.webp", final_size=1)
+        add(self.con, "f")
+        add(self.con, "g", location="win_dl", dest_location="mega", dest_dir="TBC")
+        db.set_status(self.con, row(self.con, "g", "win_dl")["id"], "queued",
+                      final_relpath="TBC/g.webp", final_size=1)
+        db.set_status(self.con, row(self.con, "f")["id"], "queued",
+                      final_relpath="elsewhere/f.webp", final_size=1)
+        self.assertEqual(db.planned_names(self.con, "d", "out"), {"a.webp", "b.webp", "c.webp"})
+        self.assertEqual(db.planned_names(self.con, "d", "out",
+                                          exclude_id=row(self.con, "a")["id"]),
+                         {"b.webp", "c.webp"})
+        self.assertEqual(db.planned_names(self.con, "mega", "TBC"), {"g.webp"})
+        self.assertEqual(db.planned_names(self.con, "d", ""), set())
+
+
 class RenameTests(DbTestCase):
     def test_rename_replaces_stale_row_at_target(self):
         add(self.con, "old/a.mp4")

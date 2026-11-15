@@ -21,6 +21,7 @@ from .locations import Location, MacUnreachable, NoSpace
 log = logging.getLogger(__name__)
 _finalize_lock = threading.Lock()
 _post_step_lock = threading.Lock()
+MTIME_TOLERANCE_S = 2.0
 _POST_STEP_STATUSES = ("done", "skipped", "rejected")
 _REJECT_STATUSES = {"efficient": "skipped", "no-gain": "rejected", "low-quality": "rejected",
                     "error": "error"}
@@ -33,6 +34,19 @@ def _split(relpath: str) -> tuple[str, str]:
 
 def _join(folder: str, name: str) -> str:
     return f"{folder}/{name}" if folder else name
+
+
+def _landed_is_ours(landed, item) -> bool:
+    """A file at the recorded path is ours only if its size and mtime match what we planned
+    (`publish` stamps the final file with the source's mtime)."""
+    return (landed is not None and landed.size == item["final_size"]
+            and abs(landed.mtime - item["mtime"]) <= MTIME_TOLERANCE_S)
+
+
+def _taken_in(con, loc: Location, folder: str, item_id: int) -> Callable[[str], bool]:
+    """Name is taken if the file exists or another live row plans to publish it."""
+    planned = db.planned_names(con, loc.name, folder, exclude_id=item_id)
+    return lambda n: n in planned or loc.exists(_join(folder, n))
 
 
 def process_item(con, item: sqlite3.Row, locs: dict[str, Location], cfg: Config, work: Path,
@@ -86,7 +100,7 @@ def _process_library(con, item, locs, cfg, tmp, on_progress) -> str:
     delay = cfg.mac_delete_delay_s if loc.is_mac else 0
     if item["final_relpath"] and item["final_size"] is not None:
         landed = loc.stat(item["final_relpath"])
-        if landed is not None and landed.size == item["final_size"]:
+        if _landed_is_ours(landed, item):
             # an earlier attempt published this file but was cut off before recording it
             db.set_status(con, item["id"], "published", not_before=loc.now() + delay)
             return _after_published(con, item, locs, loc, cfg)
@@ -108,8 +122,7 @@ def _process_library(con, item, locs, cfg, tmp, on_progress) -> str:
         return _intake_post_step(con, item, loc, cfg, status)
 
     folder = _split(item["relpath"])[0]
-    final = rules.final_name(name, rules.out_ext(name),
-                             lambda n: loc.exists(_join(folder, n)))
+    final = rules.final_name(name, rules.out_ext(name), _taken_in(con, loc, folder, item["id"]))
     final_rel = _join(folder, final)
     expected = outcome.out.stat().st_size
     # record the plan first: if the publish lands but is not recorded, the retry finds it
@@ -154,7 +167,7 @@ def _move_to_converted(con, item_id: int, loc: Location, cfg: Config) -> None:
         current = (row["final_relpath"] if row["status"] == "done" and row["final_relpath"]
                    else row["relpath"])
         name = _split(current)[1]
-        target = rules.free_name(name, lambda n: loc.exists(_join(cfg.d_converted, n)))
+        target = rules.free_name(name, _taken_in(con, loc, cfg.d_converted, item_id))
         new_rel = _join(cfg.d_converted, target)
         loc.move_within(current, new_rel)
         db.rename_item(con, item_id, new_rel)
@@ -190,14 +203,14 @@ def _process_download(con, item, locs, cfg, tmp, on_progress) -> str:
         raise MacUnreachable(f"{dest.name} is not reachable")
     if item["final_relpath"] and item["final_size"] is not None:
         landed = dest.stat(item["final_relpath"])
-        if landed is not None and landed.size == item["final_size"]:
+        if _landed_is_ours(landed, item):
             # an earlier attempt published this copy but was cut off before the source was deleted
-            stem = Path(item["final_relpath"]).stem.lower()
+            # converted output is at most 75% of the source; an unconverted payload is equal
             return _finish_download(con, item, src_loc, dest, item["final_relpath"],
-                                    landed.size, converted=stem.endswith("_compressed"))
+                                    landed.size, converted=item["final_size"] < item["size"])
         db.set_status(con, item["id"], "running", final_relpath=None, final_size=None)
     local, name = _fetch(src_loc, item, tmp)
-    taken = lambda n: dest.exists(_join(item["dest_dir"], n))
+    taken = _taken_in(con, dest, item["dest_dir"], item["id"])
     converted = False
     payload, out_name = local, None
     if not name.lower().endswith(".webp"):

@@ -60,7 +60,7 @@ def video_decision(codec: str, bpp: float | None, cfg: Config) -> str:
 
 
 def route_download(name: str, size: int, cfg: Config) -> str | None:
-    if is_ignored(name):
+    if is_ignored(name) or is_compressed_name(name):
         return None
     kind = kind_of(name)
     if kind is None and _split(name)[1] != ".webp":

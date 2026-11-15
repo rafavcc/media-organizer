@@ -51,6 +51,10 @@ class RouteDownloadTests(unittest.TestCase):
         self.assertIsNone(route_download("a.mp4.crdownload", 1, CFG))
         self.assertIsNone(route_download(".a.mp4", 1, CFG))
 
+    def test_compressed_names_never_routed(self):
+        self.assertIsNone(route_download("foo_compressed.png", 1, CFG))
+        self.assertIsNone(route_download("FOO_COMPRESSED.MP4", 1, CFG))
+
 
 class NamingTests(unittest.TestCase):
     def test_final_name(self):

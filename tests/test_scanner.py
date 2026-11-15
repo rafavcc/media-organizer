@@ -193,6 +193,12 @@ class DownloadsTests(ScannerCase):
         self.assertTrue((self.cfg.win_downloads / "sub" / "inner.png").exists())
         self.assertEqual((res.moved, res.queued), (1, 3))
 
+    def test_compressed_name_left_alone(self):
+        write(self.cfg.win_downloads / "foo_compressed.png")
+        scan_downloads(self.con, self.dl, self.locs(), self.cfg)
+        self.assertEqual(self.rows(), [])
+        self.assertTrue((self.cfg.win_downloads / "foo_compressed.png").exists())
+
     def test_young_files_wait(self):
         write(self.cfg.win_downloads / "small.mp4", mtime=time.time())
         scan_downloads(self.con, self.dl, self.locs(), self.cfg)

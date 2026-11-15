@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 from media_organizer import db, worker
+from media_organizer.convert import Outcome
 from media_organizer.locations import LocalLocation, MacUnreachable, NoSpace
 from tests.helpers import make_image, make_video, test_config
 
@@ -374,6 +375,98 @@ class RecoveryTests(Base):
         self.assertFalse(p.exists())
         self.assertEqual(self.row(item)["status"], "done")
         self.assertEqual(len(self.conversions()), 1)
+
+    def fake_convert(self, size=50):
+        def convert(local, name, src_size, tmp, cfg, on_progress=None):
+            out = Path(tmp) / "out.bin"
+            out.write_bytes(b"c" * size)
+            return Outcome("ok", "", out)
+        p = mock.patch("media_organizer.worker.convert", side_effect=convert)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_planned_name_of_other_item_not_taken(self):
+        self.fake_convert()
+        a = self.dl.root / "pic.png"
+        b = self.dl.root / "pic.jpg"
+        a.write_bytes(b"a" * 200)
+        b.write_bytes(b"b" * 300)
+        os.utime(a, (1_500_000_000, 1_500_000_000))
+        os.utime(b, (1_600_000_000, 1_600_000_000))
+        item_a = self.add_dl("pic.png")
+        db.set_status(self.con, item_a["id"], "running", final_relpath="TBC/pic_compressed.webp",
+                      final_size=50)  # A's publish was cut off before the rename
+        item_a = self.row(item_a)
+        item_b = self.add_dl("pic.jpg")
+        self.assertEqual(self.row(item_b)["relpath"], "pic.jpg")
+        self.assertEqual(self.run_item(item_b), "done")
+        self.assertFalse((self.mega.root / "TBC" / "pic_compressed.webp").exists())
+        self.assertEqual(self.run_item(item_a), "done")
+        self.assertEqual(sorted(f.name for f in (self.mega.root / "TBC").iterdir()),
+                         ["pic_compressed.webp", "pic_jpg_compressed.webp"])
+        self.assertEqual((self.mega.root / "TBC" / "pic_compressed.webp").stat().st_mtime,
+                         1_500_000_000)
+        self.assertFalse(a.exists())
+        self.assertFalse(b.exists())
+        self.assertEqual(len(self.conversions()), 2)
+
+    def test_landed_file_with_other_mtime_is_not_ours(self):
+        a = self.dl.root / "pic.png"
+        a.write_bytes(b"a" * 200)
+        os.utime(a, (1_500_000_000, 1_500_000_000))
+        item = self.add_dl("pic.png")
+        self.fake_convert()
+        (self.mega.root / "TBC").mkdir()
+        other = self.mega.root / "TBC" / "pic_compressed.webp"
+        other.write_bytes(b"o" * 50)
+        os.utime(other, (1_400_000_000, 1_400_000_000))
+        db.set_status(self.con, item["id"], "running", final_relpath="TBC/pic_compressed.webp",
+                      final_size=50)
+        self.assertEqual(self.run_item(self.row(item)), "done")
+        self.assertEqual(other.read_bytes(), b"o" * 50)
+        self.assertEqual(sorted(f.name for f in (self.mega.root / "TBC").iterdir()),
+                         ["pic_compressed.webp", "pic_png_compressed.webp"])
+
+    def test_library_landed_file_with_other_mtime_is_not_ours(self):
+        p = make_video(self.mega.root / "x.mp4")
+        os.utime(p, (1_500_000_000, 1_500_000_000))
+        other = self.mega.root / "x_compressed.mp4"
+        other.write_bytes(b"o" * 99)
+        os.utime(other, (1_400_000_000, 1_400_000_000))
+        item = self.add(self.mega, "x.mp4")
+        db.set_status(self.con, item["id"], "running", final_relpath="x_compressed.mp4",
+                      final_size=99)
+        self.assertEqual(self.run_item(self.row(item)), "published")
+        self.assertEqual(self.row(item)["final_relpath"], "x_mp4_compressed.mp4")
+
+    def test_unconverted_compressed_named_webp_logs_no_conversion(self):
+        (self.dl.root / "foo_compressed.webp").write_bytes(b"webpdata")
+        item = self.add_dl("foo_compressed.webp")
+        self.mega.error_after_publish = MacUnreachable("x")
+        with self.assertRaises(MacUnreachable):
+            self.run_item(item)
+        self.mega.error_after_publish = None
+        item = self.requeue_claim(item)
+        self.assertEqual(self.run_item(item), "done")
+        self.assertEqual(self.conversions(), [])
+        self.assertTrue((self.mega.root / "TBC" / "foo_compressed.webp").exists())
+        self.assertFalse((self.dl.root / "foo_compressed.webp").exists())
+
+    def test_intake_post_step_avoids_planned_name(self):
+        (self.d.root / "_TO_CONVERT").mkdir()
+        make_video(self.d.root / "_TO_CONVERT" / "v.mp4")
+        item = self.add(self.d, "_TO_CONVERT/v.mp4", source="intake")
+        db.upsert_candidate(self.con, location="d", relpath="other.mp4", size=1, mtime=1.0,
+                            kind="video", source="library", priority=3, settings="s")
+        other = self.con.execute("SELECT id FROM items WHERE relpath='other.mp4'").fetchone()
+        db.set_status(self.con, other["id"], "queued",
+                      final_relpath="_CONVERTED/v_compressed.mp4", final_size=1)
+        self.assertEqual(self.run_item(item), "done")
+        self.assertEqual(self.row(item)["relpath"], "_CONVERTED/v_compressed (1).mp4")
+
+    def add_dl(self, name, kind="image"):
+        return self.add(self.dl, name, kind=kind, source="downloads",
+                        dest_location="mega", dest_dir="TBC")
 
     def test_reset_running_keeps_recorded_publish(self):
         make_video(self.mega.root / "x.mp4")

@@ -122,6 +122,20 @@ def rename_item(con, item_id: int, new_relpath: str) -> None:
         con.execute("UPDATE items SET relpath=? WHERE id=?", (new_relpath, item_id))
 
 
+def planned_names(con, location: str, folder: str, exclude_id: int | None = None) -> set[str]:
+    """File names in `folder` of `location` that live rows have planned to publish."""
+    rows = con.execute(
+        "SELECT final_relpath FROM items WHERE COALESCE(dest_location, location)=? "
+        "AND status IN ('queued','running','published') AND final_relpath IS NOT NULL "
+        "AND id IS NOT ?", (location, exclude_id)).fetchall()
+    names = set()
+    for r in rows:
+        head, _, name = r["final_relpath"].rpartition("/")
+        if head == folder:
+            names.add(name)
+    return names
+
+
 def claim_next(con, *, kind: str, exclude_locations: Collection[str]):
     excluded = list(exclude_locations)
     marks = ",".join("?" * len(excluded))
