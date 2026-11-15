@@ -127,10 +127,15 @@ class LocalLocation(Location):
         if self.free_bytes() < size + min_free:
             raise NoSpace(f"{self.name}: need {size + min_free} bytes free for {relpath}")
         final = self.path(relpath)
+        if os.path.lexists(final):
+            raise FileExistsError(f"{self.name}: {relpath} already exists")
         part = final.with_name(final.name + PART_SUFFIX)
         try:
             final.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, part)
+            got = part.stat().st_size
+            if got != size:
+                raise OSError(f"{relpath}: wrote {got} of {size} bytes")
             if mtime is not None:
                 os.utime(part, (mtime, mtime))
             os.replace(part, final)
@@ -190,6 +195,11 @@ class MacSession:
                 return True
         return False
 
+    def require_mounted(self) -> None:
+        """Raise MacUnreachable unless the sshfs mount is up. Never mounts; only reachable() does."""
+        if not self._is_mounted():
+            raise MacUnreachable(f"{self.mount} is not mounted")
+
     def _mount_alive(self) -> bool:
         try:
             os.stat(self.mount)
@@ -241,6 +251,7 @@ def _mac_guard(fn):
     """Turn disconnect errors (or a dead mount) into MacUnreachable."""
     @functools.wraps(fn)
     def wrapper(self, *args, **kwargs):
+        self.session.require_mounted()
         try:
             return fn(self, *args, **kwargs)
         except OSError as e:
@@ -285,8 +296,12 @@ class MacLocation(LocalLocation):
     exists = _mac_guard(LocalLocation.exists)
     delete = _mac_guard(LocalLocation.delete)
     move_within = _mac_guard(LocalLocation.move_within)
-    free_bytes = _mac_guard(LocalLocation.free_bytes)
     publish = _mac_guard(LocalLocation.publish)
+
+    @_mac_guard
+    def free_bytes(self) -> int:
+        # strict: never fall back to a local ancestor, which would measure the wrong disk
+        return shutil.disk_usage(self.root).free
 
     @_mac_guard
     def fetch(self, relpath: str, dest: Path) -> None:

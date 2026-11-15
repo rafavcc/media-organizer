@@ -26,6 +26,7 @@ class FakeRunner:
 def mac_location(tmp, runner=None):
     runner = runner or FakeRunner()
     session = MacSession("mac", Path(tmp) / "mnt", runner)
+    session._is_mounted = lambda: True  # the fake mount is a plain temp folder
     loc = MacLocation("mega", session, "home/MEGA")
     loc.root.mkdir(parents=True)
     loc.retry_delay = 0
@@ -76,6 +77,29 @@ class LocalTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.loc.publish(src, "out.bin", None, 0)
         self.assertEqual(list(self.loc.root.rglob("*")), [])
+
+    def test_publish_short_copy_leaves_nothing(self):
+        src = self.tmp / "src.bin"
+        src.write_bytes(b"x" * 10)
+
+        def truncating(s, d):
+            Path(d).write_bytes(b"xx")
+        with mock.patch("media_organizer.locations.shutil.copyfile", truncating), \
+                mock.patch("media_organizer.locations.os.replace") as replace:
+            with self.assertRaises(OSError):
+                self.loc.publish(src, "out.bin", None, 0)
+        replace.assert_not_called()  # a short part must never reach the final name
+        self.assertEqual(list(self.loc.root.rglob("*.bin*")), [])
+
+    def test_publish_never_overwrites(self):
+        src = self.tmp / "src.bin"
+        src.write_bytes(b"new")
+        (self.loc.root).mkdir()
+        (self.loc.root / "out.bin").write_bytes(b"precious")
+        with self.assertRaises(FileExistsError):
+            self.loc.publish(src, "out.bin", None, 0)
+        self.assertEqual((self.loc.root / "out.bin").read_bytes(), b"precious")
+        self.assertEqual([p.name for p in self.loc.root.iterdir()], ["out.bin"])
 
     def test_fetch_and_size_mismatch(self):
         (self.loc.root).mkdir()
@@ -168,6 +192,31 @@ class MacTests(unittest.TestCase):
                            side_effect=OSError(errno.ENOTCONN, "x")):
             with self.assertRaises(MacUnreachable):
                 list(loc.walk())
+
+    def test_unmounted_mount_point_is_unreachable(self):
+        loc, _ = mac_location(self.tmp)
+        loc.session._is_mounted = lambda: False
+        (loc.root / "f.mp4").write_bytes(b"data")  # shadow file on the local disk
+        src = self.tmp / "src.bin"
+        src.write_bytes(b"1234")
+        before = sorted(self.tmp.rglob("*"))
+        for call in (lambda: list(loc.walk()), lambda: loc.stat("f.mp4"),
+                     lambda: loc.exists("f.mp4"), lambda: loc.free_bytes(),
+                     lambda: loc.publish(src, "new/out.mp4", None, 0),
+                     lambda: loc.delete("f.mp4"), lambda: loc.move_within("f.mp4", "g.mp4"),
+                     lambda: loc.fetch("f.mp4", self.tmp / "d.mp4")):
+            with self.assertRaises(MacUnreachable):
+                call()
+        self.assertEqual(sorted(self.tmp.rglob("*")), before)
+
+    def test_non_disconnect_error_stays_oserror(self):
+        loc, _ = mac_location(self.tmp)
+        src = self.tmp / "src.bin"
+        src.write_bytes(b"1234")
+        with mock.patch("media_organizer.locations.shutil.copyfile",
+                        side_effect=PermissionError(errno.EACCES, "denied")):
+            with self.assertRaises(PermissionError):
+                loc.publish(src, "out.mp4", None, 0)
 
     def test_evict(self):
         loc, runner = mac_location(self.tmp)
