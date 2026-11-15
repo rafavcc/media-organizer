@@ -75,6 +75,48 @@ class LocalTests(unittest.TestCase):
                     self.assertLess(rels.index(other), rels.index(rel))
         self.assertEqual(list(self.loc.walk_dirs("missing")), [])
 
+    def test_unreadable_folder_is_skipped_and_reported(self):
+        r = self.loc.root
+        for rel in ["ok/a.mp4", "locked/inner/b.mp4", "locked/sibling/c.mp4"]:
+            (r / rel).parent.mkdir(parents=True, exist_ok=True)
+            (r / rel).write_bytes(b"1")
+        os.chmod(r / "locked" / "inner", 0)
+        self.addCleanup(os.chmod, r / "locked" / "inner", 0o755)
+        if os.access(r / "locked" / "inner", os.R_OK):
+            self.skipTest("permissions not enforced")
+        skipped = []
+        self.assertEqual(sorted(e.relpath for e in self.loc.walk(skipped=skipped)),
+                         ["locked/sibling/c.mp4", "ok/a.mp4"])
+        self.assertEqual(skipped, ["locked/inner"])
+        skipped = []
+        rels = [e.relpath for e in self.loc.walk_dirs(skipped=skipped)]
+        self.assertEqual(skipped, ["locked/inner"])
+        self.assertEqual(sorted(rels), ["locked/sibling", "ok"])  # not it, not its ancestors
+
+    def test_package_folders_not_walked(self):
+        r = self.loc.root
+        (r / "Foo.app" / "Contents").mkdir(parents=True)
+        (r / "Foo.app" / "Contents" / "a.png").write_bytes(b"1")
+        (r / "Lib.PhotosLibrary").mkdir()
+        (r / "ok").mkdir()
+        self.assertEqual(list(self.loc.walk()), [])
+        self.assertEqual([e.relpath for e in self.loc.walk_dirs()], ["ok"])
+
+    def test_mac_disconnect_while_listing_is_unreachable(self):
+        loc, _ = mac_location(self.tmp)
+        (loc.root / "sub").mkdir()
+        real = os.scandir
+
+        def fake(path):
+            if str(path).endswith("sub"):
+                raise OSError(errno.ENOTCONN, "gone")
+            return real(path)
+        with mock.patch("media_organizer.locations.os.scandir", side_effect=fake):
+            with self.assertRaises(MacUnreachable):
+                list(loc.walk())
+            with self.assertRaises(MacUnreachable):
+                list(loc.walk_dirs())
+
     def test_rmdir_only_empty_and_never_root(self):
         r = self.loc.root
         (r / "a").mkdir(parents=True)
@@ -263,7 +305,7 @@ class MacTests(unittest.TestCase):
                      lambda: loc.exists("f.mp4"), lambda: loc.free_bytes(),
                      lambda: loc.publish(src, "new/out.mp4", None, 0),
                      lambda: loc.delete("f.mp4"), lambda: loc.rmdir("sub"),
-                     lambda: list(loc.walk_dirs()), lambda: loc.is_symlink("f.mp4"),
+                     lambda: list(loc.walk_dirs()), lambda: loc.is_plain_file("f.mp4"),
                      lambda: loc.move_within("f.mp4", "g.mp4"),
                      lambda: loc.fetch("f.mp4", self.tmp / "d.mp4")):
             with self.assertRaises(MacUnreachable):

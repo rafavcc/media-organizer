@@ -151,12 +151,14 @@ def _dry_run(cfg: Config) -> int:
                 print(f"WOULD QUEUE {name} {row['relpath']} {row['size'] / MIB:.1f} MB")
             for source, target in res.would_move:
                 print(f"WOULD MOVE {name} {source} -> {target}")
+            extra = ""
+            if name in ("win_dl", "mac_dl"):
+                extra = f", {len(res.would_delete)} .nfo, {len(res.would_remove)} folders"
             for relpath in res.would_delete:
                 print(f"WOULD DELETE {name} {relpath}")
             for relpath in res.would_remove:
                 print(f"WOULD REMOVE FOLDER {name} {relpath}")
-            print(f"{name}: {len(queued)} would queue, {len(res.would_move)} would move, "
-                  f"{len(res.would_delete)} .nfo, {len(res.would_remove)} folders")
+            print(f"{name}: {len(queued)} would queue, {len(res.would_move)} would move{extra}")
     finally:
         con.close()
     return 0

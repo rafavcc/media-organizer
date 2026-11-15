@@ -699,6 +699,31 @@ class DownloadsTests(Base):
         self.assertTrue((self.mega.root / "TBC" / "v (1).mp4").exists())
         self.assertFalse((self.dl.root / "v.mp4").exists())
 
+    def test_nested_source_lands_flat_and_nested_source_deleted(self):
+        (self.dl.root / "a" / "b").mkdir(parents=True)
+        make_image(self.dl.root / "a" / "b" / "pic.png")
+        item = self.add_dl("a/b/pic.png")
+        self.assertEqual(self.run_item(item), "done")
+        self.assertTrue((self.mega.root / "TBC" / "pic_compressed.webp").exists())
+        self.assertFalse((self.dl.root / "a" / "b" / "pic.png").exists())
+        self.assertTrue((self.dl.root / "a" / "b").is_dir())  # the folder is the sweep's business
+        self.assertEqual(list((self.mega.root / "TBC").iterdir()),
+                         [self.mega.root / "TBC" / "pic_compressed.webp"])
+
+    def test_same_name_in_two_subfolders_gets_distinct_names(self):
+        for sub, data in (("a", b"one"), ("b", b"two")):
+            (self.dl.root / sub).mkdir()
+            (self.dl.root / sub / "pic.webp").write_bytes(data)
+        first = self.add_dl("a/pic.webp")
+        self.assertEqual(self.run_item(first), "done")
+        second = self.add_dl("b/pic.webp")
+        self.assertEqual(self.run_item(second), "done")
+        tbc = self.mega.root / "TBC"
+        self.assertEqual((tbc / "pic.webp").read_bytes(), b"one")
+        self.assertEqual((tbc / "pic (1).webp").read_bytes(), b"two")
+        self.assertFalse((self.dl.root / "a" / "pic.webp").exists())
+        self.assertFalse((self.dl.root / "b" / "pic.webp").exists())
+
     def test_mac_unreachable(self):
         make_image(self.dl.root / "pic.png")
         item = self.add_dl("pic.png")

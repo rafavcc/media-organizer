@@ -210,7 +210,7 @@ class ScanTests(CliCase):
         self.assertEqual(code, 0)
         self.assertIn("WOULD QUEUE d A/x.mp4 3.0 MB", out)
         self.assertIn("WOULD MOVE win_dl big.mp4 -> d/_TO_CONVERT/big.mp4", out)
-        self.assertIn("d: 1 would queue, 0 would move", out)
+        self.assertIn("d: 1 would queue, 0 would move\n", out)
         self.assertIn("win_dl: 0 would queue, 1 would move, 1 .nfo, 1 folders", out)
         self.assertIn("WOULD DELETE win_dl sub/info.NFO", out)
         self.assertIn("WOULD REMOVE FOLDER win_dl empty/inner", out)

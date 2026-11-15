@@ -9,6 +9,10 @@ from .config import Config
 VIDEO_EXT = frozenset({".mp4", ".mov", ".mkv", ".avi", ".wmv", ".webm", ".m4v"})
 IMAGE_EXT = frozenset({".jpg", ".jpeg", ".png", ".gif", ".heic", ".heif", ".tif", ".tiff", ".bmp"})
 PARTIAL_EXT = frozenset({".part", ".crdownload", ".download", ".mo-part"})
+# folders that are really single objects (macOS packages and libraries): never entered or removed
+PACKAGE_EXT = frozenset({".app", ".bundle", ".framework", ".plugin", ".kext", ".pkg", ".mpkg",
+                         ".photoslibrary", ".fcpbundle", ".imovielibrary", ".musiclibrary",
+                         ".tvlibrary", ".xcarchive", ".lrlibrary", ".lrdata", ".dsym"})
 SUFFIX = "_compressed"
 MP4_AUDIO = frozenset({"aac", "mp3", "ac3", "eac3", "alac"})
 
@@ -25,6 +29,11 @@ def kind_of(name: str) -> str | None:
     if ext in IMAGE_EXT:
         return "image"
     return None
+
+
+def is_skipped_dir(name: str) -> bool:
+    """Dot-folders and package folders are never walked, routed from or removed."""
+    return name.startswith(".") or posixpath.splitext(name)[1].lower() in PACKAGE_EXT
 
 
 def is_compressed_name(name: str) -> bool:

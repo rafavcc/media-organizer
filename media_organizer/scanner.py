@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 from . import db, rules
 from .config import Config
-from .locations import PART_SUFFIX, Location, MacUnreachable, NoSpace
+from .locations import PART_SUFFIX, Location, NoSpace
 from .probe import probe_video
 
 JUNK_NAMES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
@@ -77,7 +77,8 @@ def scan_library(con, loc: Location, cfg: Config, *, sub: str = "", full: bool,
     entries = 0
     intake = _intake_folder(loc, cfg)
     seen: set[str] = set()
-    for entry in loc.walk(sub):
+    skipped: list[str] = []
+    for entry in loc.walk(sub, skipped=skipped):
         entries += 1
         name = posixpath.basename(entry.relpath)
         if full and name.endswith(".mo-part"):
@@ -115,6 +116,10 @@ def scan_library(con, loc: Location, cfg: Config, *, sub: str = "", full: bool,
     if full and entries == 0 and _has_rows(con, loc.name, sub):
         res.suspect = True  # an unmounted drive looks like an empty folder: prune nothing
         return res
+    for folder in skipped:  # an unreadable folder says nothing about the rows under it
+        seen.update(r["relpath"] for r in con.execute(
+            "SELECT relpath FROM items WHERE location=? AND substr(relpath, 1, ?)=?",
+            (loc.name, len(folder) + 1, folder + "/")))
     if full and not dry_run:
         db.prune_missing(con, location=loc.name, under=sub, seen=seen)
         refresh_folders(con, loc)
@@ -170,12 +175,15 @@ def _remove_empty_folders(loc: Location, cfg: Config, res: ScanResult, dry_run: 
     for folder in loc.walk_dirs():
         if not _old_enough(loc, folder, cfg):
             continue
-        names = loc.list_names(folder.relpath)
+        try:
+            names = loc.list_names(folder.relpath)
+        except OSError:
+            continue  # cannot be read: not known to be empty
         junk = [n for n in names if n.lower() in JUNK_NAMES]
         if len(junk) != len(names):
             continue  # holds something else
-        if any(loc.is_symlink(f"{folder.relpath}/{n}") for n in junk):
-            continue
+        if not all(loc.is_plain_file(f"{folder.relpath}/{n}") for n in junk):
+            continue  # a folder or link named like junk: delete nothing
         if dry_run:
             res.would_remove.append(folder.relpath)
             continue
@@ -183,9 +191,7 @@ def _remove_empty_folders(loc: Location, cfg: Config, res: ScanResult, dry_run: 
             for n in junk:
                 loc.delete(f"{folder.relpath}/{n}")
             loc.rmdir(folder.relpath)
-        except (FileNotFoundError, OSError) as e:
-            if isinstance(e, MacUnreachable):
-                raise
+        except OSError:  # MacUnreachable is not an OSError and propagates
             continue  # something appeared in it, or it is gone; the next sweep decides
         log.info("removed folder %s %s", loc.name, folder.relpath)
         res.dirs_removed += 1

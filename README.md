@@ -87,7 +87,7 @@ The first full pass over the roughly 860 GB in D: takes **days to weeks**. That 
    media-organizer scan --dry-run
    ```
 
-   This changes nothing and writes nothing to the real database. It prints lines like `WOULD QUEUE d Some/Folder/clip.mp4 812.3 MB` and `WOULD MOVE win_dl big.mkv -> ...`, `WOULD DELETE win_dl Some/Folder/movie.nfo` (a `.nfo` file that would be deleted) and `WOULD REMOVE FOLDER win_dl Old/Empty` (a folder that is empty right now and would be removed), then one summary per place: `d: 1488 would queue, 0 would move, 0 .nfo, 0 folders`. The four places are `d` (D: library), `mega`, `win_dl` (Windows Downloads) and `mac_dl` (Mac Downloads). What to look for:
+   This changes nothing and writes nothing to the real database. It prints lines like `WOULD QUEUE d Some/Folder/clip.mp4 812.3 MB` and `WOULD MOVE win_dl big.mkv -> ...`, `WOULD DELETE win_dl Some/Folder/movie.nfo` (a `.nfo` file that would be deleted) and `WOULD REMOVE FOLDER win_dl Old/Empty` (a folder that is empty right now and would be removed), then one summary per place: `d: 1488 would queue, 0 would move` (the Downloads places add `, 0 .nfo, 0 folders`). The four places are `d` (D: library), `mega`, `win_dl` (Windows Downloads) and `mac_dl` (Mac Downloads). What to look for:
    - `d: 0 would queue` when you know D: is full of videos means D: is not mounted. Stop and fix that.
    - `SKIP mega (unreachable)` or `SKIP mac_dl (unreachable)` is what you see unless the Mac is already mounted: a dry run never mounts it. To preview MEGA, run `ssh mac true`, then mount it as the old README describes and run the dry run again:
 
@@ -157,7 +157,7 @@ The first full pass over the roughly 860 GB in D: takes **days to weeks**. That 
 
    Must stay untouched: the rest of `MEGA` (everything outside `MEGA_TRIAL`), the Mac's real `Downloads` and everything on D: except `_trial`.
 
-   **Trial 4: one file through each Downloads route.** Put into `trial-downloads` (and the Mac's `Downloads/trial`) a video over 400 MB, a small video and an image, some of them inside subfolders; the big video must land in `_trial/_TO_CONVERT` and the others in the trial MEGA `TBC` folder. Also add a `.nfo` file, an empty subfolder and a `.pdf` inside another subfolder: after the sweep (and 10 minutes) the `.nfo` and the empty folder must be gone and the `.pdf` and its folder must still be there. `~/media-organizer-trial4.toml`:
+   **Trial 4: one file through each Downloads route.** Put into `trial-downloads` (and the Mac's `Downloads/trial`) a video over 400 MB, a small video and an image, some of them inside subfolders; the big video must land in `_trial/_TO_CONVERT` and the others in the trial MEGA `TBC` folder. Also add a `.nfo` file, an empty subfolder and a `.pdf` inside another subfolder, **at least 10 minutes before you start `run`** (they are only touched once they are 10 minutes old, and the next sweep is 6 hours later; alternatively add `min_age_min = 0` to that trial's settings file, which makes every file and folder eligible at once). After the first sweep the `.nfo` and the empty folder must be gone and the `.pdf` and its folder must still be there. `~/media-organizer-trial4.toml`:
 
    ```toml
    d_root = "/mnt/d/_trial"
@@ -308,7 +308,7 @@ Each file the program knows has a status, and often a reason. Statuses appear in
 
 ## What it will never do
 
-- It never enters a folder whose name starts with `.` (in Downloads or in the libraries), and never follows a symbolic link or junction to another folder or file.
+- It never enters a folder whose name starts with `.` (in Downloads or in the libraries), nor a macOS package or library folder (a folder whose name ends in `.app`, `.bundle`, `.framework`, `.plugin`, `.kext`, `.pkg`, `.mpkg`, `.photoslibrary`, `.fcpbundle`, `.imovielibrary`, `.musiclibrary`, `.tvlibrary`, `.xcarchive`, `.lrlibrary`, `.lrdata` or `.dSYM`, any capitals); these are never searched, moved from or removed. A folder it cannot read (permissions) is skipped with a line in the log, and neither it nor its parents are ever removed. It cannot recognise an extracted Windows program or game folder: its images and videos **will** be swept and its `.nfo` files deleted, so do not extract software inside Downloads. It also never follows a symbolic link or junction to another folder or file.
 - In Downloads the only things it deletes are: `.nfo` files, empty folders (with their `.DS_Store`, `Thumbs.db` or `desktop.ini`) and the originals it has moved or converted after checking them. It never deletes the Downloads folder itself, never deletes a folder that holds anything else, and removes folders only with a plain "remove empty folder" (never recursively). Any other file type in Downloads (`.pdf`, `.zip`, ...) is left alone.
 - It never touches a file whose name ends in `_compressed` (any capitals).
 - It never deletes an original that changed since it was read, or one whose replacement is missing or the wrong size.
@@ -332,9 +332,11 @@ All settings are in `~/.config/media-organizer/config.toml`; `deploy/config.exam
 | `min_free_gb` | 2 | Free space to keep on the destination drive |
 | `mac_host` | `mac` | The ssh alias of the Mac |
 | `encode_stall_min` | 30 | Minutes without any encoding progress after which a video encode is considered stuck |
-| `min_age_min` | 10 | Minutes a file or folder must be unchanged before it is touched (applies to Downloads media, `.nfo` files and empty folders) |
+| `min_age_min` | 10 | Minutes a file or folder must be unchanged before it is touched (applies to library and intake files, Downloads media, `.nfo` files and empty folders) |
 
 **Encoder watchdog.** While a video is being encoded, the program watches ffmpeg's progress. If it does not move for `encode_stall_min` minutes (counted from the start of the encode), ffmpeg is stopped, the file is marked `error` ("encoder stalled") with the original untouched, and the next file goes on. Image conversions, ffprobe and the other conversion tools also have time limits (2 minutes for probing, 30 minutes for the rest); a tool that runs past its limit is stopped and the file is marked `error` naming the tool. Use `media-organizer retry-errors` once the cause is fixed. For very slow machines or very long videos, raise `encode_stall_min`.
+
+**Downloads paths are checked at start.** The program refuses to start when `win_downloads` is `/`, a drive (`/mnt/c`), `/mnt/c/Users`, a user's home folder, or overlaps `d_root` or `state_dir`; or when `mac_downloads` is empty, `.`, `Desktop`, `Documents`, `Library` or inside `Library`, or overlaps `mac_mega`. The message names the key.
 
 Restart the service after a change: `systemctl --user restart media-organizer`. An unknown key makes the program refuse to start, with the key's name in the message. If you change the quality settings (`crf`, `min_gain_ratio`, `min_ssim`, `hevc_bloat_bpp`), previously rejected files are looked at again, and `import-legacy` skips the old verdicts.
 

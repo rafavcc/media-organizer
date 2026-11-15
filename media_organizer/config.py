@@ -1,6 +1,7 @@
 """Configuration: defaults plus optional flat TOML overrides."""
 from __future__ import annotations
 
+import os
 import tomllib
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -83,4 +84,34 @@ def load_config(path: Path | None = None) -> Config:
         data[name] = Path(data[name]).expanduser()
     if "encode_stall_min" in data and not data["encode_stall_min"] >= 1:
         raise ValueError(f"encode_stall_min in {path} must be at least 1 (minutes)")
-    return Config(**data)
+    cfg = Config(**data)
+    _check_downloads(cfg)
+    return cfg
+
+
+def _under(path: str, parent: str) -> bool:
+    return path == parent or path.startswith(parent.rstrip("/") + "/")
+
+
+def _check_downloads(cfg: Config) -> None:
+    """Refuse Downloads paths so broad that the sweep (which deletes) could do real damage."""
+    win = os.path.normpath(str(cfg.win_downloads))
+    parts = win.strip("/").split("/")
+    drive = len(parts) >= 2 and parts[0] == "mnt" and len(parts[1]) == 1
+    if (win == "/" or str(cfg.win_downloads) == "" or (parts == ["mnt"]) or
+            (drive and len(parts) == 2) or
+            (drive and len(parts) == 3 and parts[2].lower() == "users") or
+            (drive and len(parts) == 4 and parts[2].lower() == "users") or
+            win == os.path.normpath(str(Path.home()))):
+        raise ValueError(f"win_downloads is too broad: {cfg.win_downloads}")
+    for key in ("d_root", "state_dir"):
+        other = os.path.normpath(str(getattr(cfg, key)))
+        if _under(win, other) or _under(other, win):
+            raise ValueError(f"win_downloads ({cfg.win_downloads}) overlaps {key} ({other})")
+    mac = os.path.normpath(cfg.mac_downloads.strip().strip("/") or ".")
+    if (mac in (".", "Desktop", "Documents", "Library") or mac.startswith(("Library/", "../"))
+            or mac == ".."):
+        raise ValueError(f"mac_downloads is too broad: {cfg.mac_downloads!r}")
+    mega = os.path.normpath(cfg.mac_mega.strip().strip("/") or ".")
+    if _under(mac, mega) or _under(mega, mac):
+        raise ValueError(f"mac_downloads ({cfg.mac_downloads}) overlaps mac_mega ({cfg.mac_mega})")

@@ -576,6 +576,63 @@ class RecursiveSweepTests(ScannerCase):
         self.assertEqual(res.dirs_removed, 0)
         self.assertTrue((dl / "f" / "l").is_symlink())
 
+    def test_unreadable_folder_is_skipped_and_kept(self):
+        dl = self.cfg.win_downloads
+        write(dl / "ok" / "pic.png")
+        write(dl / "locked" / "inner" / "x.png")
+        (dl / "empty").mkdir()
+        for rel in ("locked/inner", "locked", "empty"):
+            age(dl / rel)
+        os.chmod(dl / "locked" / "inner", 0)
+        self.addCleanup(os.chmod, dl / "locked" / "inner", 0o755)
+        if os.access(dl / "locked" / "inner", os.R_OK):
+            self.skipTest("permissions not enforced")
+        res = self.scan()
+        self.assertEqual([r["relpath"] for r in self.rows()], ["ok/pic.png"])
+        self.assertTrue((dl / "locked" / "inner").is_dir())
+        self.assertFalse((dl / "empty").exists())  # the rest of the sweep still ran
+        self.assertEqual(res.dirs_removed, 1)
+
+    def test_library_full_scan_does_not_prune_under_unreadable_folder(self):
+        write(self.cfg.d_root / "a" / "x.mp4")
+        write(self.cfg.d_root / "b" / "y.mp4")
+        write(self.cfg.d_root / "c" / "z.mp4")
+        scan_library(self.con, self.d, self.cfg, full=True)
+        os.chmod(self.cfg.d_root / "a", 0)
+        self.addCleanup(os.chmod, self.cfg.d_root / "a", 0o755)
+        if os.access(self.cfg.d_root / "a", os.R_OK):
+            self.skipTest("permissions not enforced")
+        (self.cfg.d_root / "b" / "y.mp4").unlink()
+        scan_library(self.con, self.d, self.cfg, full=True)
+        self.assertEqual([r["relpath"] for r in self.rows("d")], ["a/x.mp4", "c/z.mp4"])
+
+    def test_package_folders_are_untouched(self):
+        dl = self.cfg.win_downloads
+        write(dl / "Foo.APP" / "Contents" / "Resources" / "icon.png")
+        write(dl / "Foo.APP" / "Contents" / "Resources" / "i.nfo")
+        (dl / "Foo.APP" / "Contents" / "Frameworks").mkdir()
+        (dl / "Lib.photoslibrary").mkdir()
+        write(dl / "x.pkg")  # a file, not a package folder: not media, left alone
+        for p in dl.rglob("*"):
+            if p.is_dir():
+                age(p)
+        res = self.scan()
+        self.assertEqual(self.rows(), [])
+        self.assertEqual((res.nfo_deleted, res.dirs_removed), (0, 0))
+        self.assertTrue((dl / "Foo.APP" / "Contents" / "Resources" / "icon.png").exists())
+        self.assertTrue((dl / "Foo.APP" / "Contents" / "Resources" / "i.nfo").exists())
+        self.assertTrue((dl / "Foo.APP" / "Contents" / "Frameworks").is_dir())
+        self.assertTrue((dl / "Lib.photoslibrary").is_dir())
+
+    def test_junk_directory_named_like_junk_keeps_folder(self):
+        dl = self.cfg.win_downloads
+        write(dl / "j" / "Thumbs.db")
+        (dl / "j" / ".DS_Store").mkdir()
+        age(dl / "j")
+        res = self.scan()
+        self.assertEqual(res.dirs_removed, 0)
+        self.assertTrue((dl / "j" / "Thumbs.db").exists())
+
     def test_mac_rmdir_failure_is_unreachable(self):
         from tests.test_locations import mac_location
         loc, _ = mac_location(self.root)
