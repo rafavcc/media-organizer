@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -78,6 +79,34 @@ class DownloadsPathTests(unittest.TestCase):
                      "mac_downloads")
         self.rejects('mac_mega = "Downloads/mega"\n', "mac_downloads")
         self.rejects('mac_mega = "Downloads"\n', "mac_downloads")
+
+    def test_relative_or_empty_local_paths_rejected(self):
+        for key in ("win_downloads", "d_root", "state_dir"):
+            for bad in ("", ".", "Downloads", "./x"):
+                with self.subTest(key=key, bad=bad):
+                    self.rejects(f'{key} = "{bad}"\n', key)
+
+    def test_symlink_to_broad_folder_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, target in (("home", Path.home()), ("root", Path("/"))):
+                link = Path(tmp) / name
+                os.symlink(target, link)
+                with self.subTest(name=name):
+                    self.rejects(f'win_downloads = "{link}"\n', "win_downloads")
+            real = Path(tmp) / "real"
+            real.mkdir()
+            os.symlink(real, Path(tmp) / "alias")
+            self.rejects(f'win_downloads = "{real}"\nd_root = "{Path(tmp) / "alias"}"\n',
+                         "win_downloads")
+
+    def test_mac_paths_case_insensitive(self):
+        for bad in ("library", "LIBRARY/x", "desktop", "documents", "DOCUMENTS"):
+            with self.subTest(bad=bad):
+                self.rejects(f'mac_downloads = "{bad}"\n', "mac_downloads")
+        self.rejects('mac_mega = "downloads/m"\n', "mac_downloads")
+
+    def test_non_numeric_stall_is_value_error(self):
+        self.rejects('encode_stall_min = "soon"\n', "encode_stall_min")
 
     def test_readme_trial_configs_load(self):
         import re

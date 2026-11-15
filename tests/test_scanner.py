@@ -587,7 +587,9 @@ class RecursiveSweepTests(ScannerCase):
         self.addCleanup(os.chmod, dl / "locked" / "inner", 0o755)
         if os.access(dl / "locked" / "inner", os.R_OK):
             self.skipTest("permissions not enforced")
-        res = self.scan()
+        with self.assertLogs("media_organizer.locations", "WARNING") as logs:
+            res = self.scan()
+        self.assertIn("locked/inner", logs.output[0])
         self.assertEqual([r["relpath"] for r in self.rows()], ["ok/pic.png"])
         self.assertTrue((dl / "locked" / "inner").is_dir())
         self.assertFalse((dl / "empty").exists())  # the rest of the sweep still ran
@@ -603,8 +605,34 @@ class RecursiveSweepTests(ScannerCase):
         if os.access(self.cfg.d_root / "a", os.R_OK):
             self.skipTest("permissions not enforced")
         (self.cfg.d_root / "b" / "y.mp4").unlink()
-        scan_library(self.con, self.d, self.cfg, full=True)
+        with self.assertLogs("media_organizer.locations", "WARNING") as logs:
+            scan_library(self.con, self.d, self.cfg, full=True)
+        self.assertEqual(len(logs.output), 1)  # logged once per scan, not again by refresh_folders
         self.assertEqual([r["relpath"] for r in self.rows("d")], ["a/x.mp4", "c/z.mp4"])
+
+    def test_folder_without_search_permission_is_kept(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores permissions")
+        dl = self.cfg.win_downloads
+        write(dl / "ok" / "pic.png")
+        write(dl / "closed" / "x.txt")
+        (dl / "closed" / "empty").mkdir()
+        (dl / "j").mkdir()
+        write(dl / "j" / "Thumbs.db")
+        for rel in ("closed/empty", "closed", "j"):
+            age(dl / rel)
+        os.chmod(dl / "closed", 0o644)
+        self.addCleanup(os.chmod, dl / "closed", 0o755)
+        os.chmod(dl / "j", 0o644)
+        self.addCleanup(os.chmod, dl / "j", 0o755)
+        with self.assertLogs("media_organizer.locations", "WARNING"):
+            res = self.scan()
+        self.assertEqual([r["relpath"] for r in self.rows()], ["ok/pic.png"])
+        self.assertEqual(res.dirs_removed, 0)
+        os.chmod(dl / "closed", 0o755)
+        os.chmod(dl / "j", 0o755)
+        self.assertTrue((dl / "closed" / "empty").is_dir())
+        self.assertTrue((dl / "j" / "Thumbs.db").exists())
 
     def test_package_folders_are_untouched(self):
         dl = self.cfg.win_downloads

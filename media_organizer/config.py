@@ -82,8 +82,9 @@ def load_config(path: Path | None = None) -> Config:
         raise ValueError(f"unknown config key(s) in {path}: {', '.join(unknown)}")
     for name in _PATH_FIELDS & set(data):
         data[name] = Path(data[name]).expanduser()
-    if "encode_stall_min" in data and not data["encode_stall_min"] >= 1:
-        raise ValueError(f"encode_stall_min in {path} must be at least 1 (minutes)")
+    stall = data.get("encode_stall_min", 30)
+    if isinstance(stall, bool) or not isinstance(stall, (int, float)) or not stall >= 1:
+        raise ValueError(f"encode_stall_min in {path} must be a number of at least 1 (minutes)")
     cfg = Config(**data)
     _check_downloads(cfg)
     return cfg
@@ -93,25 +94,31 @@ def _under(path: str, parent: str) -> bool:
     return path == parent or path.startswith(parent.rstrip("/") + "/")
 
 
+def _resolved(cfg: Config, key: str) -> str:
+    """The absolute, symlink-resolved form of a local path key (it need not exist yet)."""
+    path = getattr(cfg, key)
+    if not path.is_absolute():
+        raise ValueError(f"{key} must be an absolute path, got {str(path)!r}")
+    return os.path.normpath(str(path.resolve(strict=False)))
+
+
 def _check_downloads(cfg: Config) -> None:
     """Refuse Downloads paths so broad that the sweep (which deletes) could do real damage."""
-    win = os.path.normpath(str(cfg.win_downloads))
+    win = _resolved(cfg, "win_downloads")
+    others = {key: _resolved(cfg, key) for key in ("d_root", "state_dir")}
     parts = win.strip("/").split("/")
     drive = len(parts) >= 2 and parts[0] == "mnt" and len(parts[1]) == 1
-    if (win == "/" or str(cfg.win_downloads) == "" or (parts == ["mnt"]) or
-            (drive and len(parts) == 2) or
-            (drive and len(parts) == 3 and parts[2].lower() == "users") or
-            (drive and len(parts) == 4 and parts[2].lower() == "users") or
-            win == os.path.normpath(str(Path.home()))):
+    if (win == "/" or parts == ["mnt"] or (drive and len(parts) == 2) or
+            (drive and len(parts) in (3, 4) and parts[2].lower() == "users") or
+            win == os.path.normpath(str(Path.home().resolve(strict=False)))):
         raise ValueError(f"win_downloads is too broad: {cfg.win_downloads}")
-    for key in ("d_root", "state_dir"):
-        other = os.path.normpath(str(getattr(cfg, key)))
+    for key, other in others.items():
         if _under(win, other) or _under(other, win):
             raise ValueError(f"win_downloads ({cfg.win_downloads}) overlaps {key} ({other})")
-    mac = os.path.normpath(cfg.mac_downloads.strip().strip("/") or ".")
-    if (mac in (".", "Desktop", "Documents", "Library") or mac.startswith(("Library/", "../"))
-            or mac == ".."):
+    mac = os.path.normpath(cfg.mac_downloads.strip().strip("/") or ".").casefold()
+    if (mac in (".", "..", "desktop", "documents", "library")
+            or mac.startswith(("library/", "../"))):
         raise ValueError(f"mac_downloads is too broad: {cfg.mac_downloads!r}")
-    mega = os.path.normpath(cfg.mac_mega.strip().strip("/") or ".")
+    mega = os.path.normpath(cfg.mac_mega.strip().strip("/") or ".").casefold()
     if _under(mac, mega) or _under(mega, mac):
         raise ValueError(f"mac_downloads ({cfg.mac_downloads}) overlaps mac_mega ({cfg.mac_mega})")

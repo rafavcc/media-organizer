@@ -85,13 +85,36 @@ class LocalTests(unittest.TestCase):
         if os.access(r / "locked" / "inner", os.R_OK):
             self.skipTest("permissions not enforced")
         skipped = []
-        self.assertEqual(sorted(e.relpath for e in self.loc.walk(skipped=skipped)),
-                         ["locked/sibling/c.mp4", "ok/a.mp4"])
+        with self.assertLogs("media_organizer.locations", "WARNING") as logs:
+            self.assertEqual(sorted(e.relpath for e in self.loc.walk(skipped=skipped)),
+                             ["locked/sibling/c.mp4", "ok/a.mp4"])
+        self.assertIn("locked/inner", logs.output[0])
         self.assertEqual(skipped, ["locked/inner"])
         skipped = []
-        rels = [e.relpath for e in self.loc.walk_dirs(skipped=skipped)]
+        with self.assertLogs("media_organizer.locations", "WARNING"):
+            rels = [e.relpath for e in self.loc.walk_dirs(skipped=skipped)]
         self.assertEqual(skipped, ["locked/inner"])
         self.assertEqual(sorted(rels), ["locked/sibling", "ok"])  # not it, not its ancestors
+
+    def test_folder_without_search_permission_is_skipped(self):
+        if os.geteuid() == 0:
+            self.skipTest("root ignores permissions")
+        r = self.loc.root
+        for rel in ["ok/a.mp4", "noexec/sub/b.mp4", "noexec/c.mp4"]:
+            (r / rel).parent.mkdir(parents=True, exist_ok=True)
+            (r / rel).write_bytes(b"1")
+        os.chmod(r / "noexec", 0o644)
+        self.addCleanup(os.chmod, r / "noexec", 0o755)
+        skipped = []
+        with self.assertLogs("media_organizer.locations", "WARNING") as logs:
+            self.assertEqual([e.relpath for e in self.loc.walk(skipped=skipped)], ["ok/a.mp4"])
+        self.assertEqual(len(logs.output), 1)
+        self.assertEqual(skipped, ["noexec"])
+        skipped = []
+        with self.assertLogs("media_organizer.locations", "WARNING"):
+            rels = [e.relpath for e in self.loc.walk_dirs(skipped=skipped)]
+        self.assertEqual(rels, ["ok"])  # neither it nor its ancestors
+        self.assertEqual(skipped, ["noexec"])
 
     def test_package_folders_not_walked(self):
         r = self.loc.root

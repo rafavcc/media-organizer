@@ -365,10 +365,6 @@ class FixRound1Tests(Base):
         self.assertEqual(calls.count("scan"), 4)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class WorkerCacheTests(Base):
     def on_thread(self, fn):
         out = {}
@@ -429,3 +425,7 @@ class TickCountTests(Base):
         with mock.patch.object(worker, "retry_evictions", return_value=0) as m:
             self.svc.tick()
         self.assertEqual(m.call_count, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

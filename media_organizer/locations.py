@@ -72,71 +72,92 @@ class LocalLocation(Location):
     def path(self, relpath: str) -> Path:
         return self.root / relpath
 
-    def _listing(self, folder: Path, rel: str, skipped: list[str] | None):
-        """Sorted entries of a folder, or None when it vanished or cannot be listed (the latter is
-        logged and added to `skipped`). A disconnected Mac is not skipped but raised."""
+    def _skip(self, e: OSError, rel: str, skipped: list[str] | None, quiet: bool) -> None:
+        """Handle an error on a folder: raise it when the Mac is gone (the guard turns it into
+        MacUnreachable), else log it and note the folder as skipped."""
+        if self._fatal(e) or (self.is_mac and not isinstance(e, PermissionError)
+                              and not self.session.ssh_alive()):
+            raise e
+        if not quiet:
+            log.warning("cannot read %s %s: %r (skipped)", self.name, rel or ".", e)
+        if skipped is not None:
+            skipped.append(rel)
+
+    def _listing(self, folder: Path, rel: str, skipped: list[str] | None, quiet: bool = False):
+        """Sorted entries of a folder, or None when it vanished or cannot be listed."""
         try:
             with os.scandir(folder) as it:
                 return sorted(it, key=lambda e: e.name)
         except (FileNotFoundError, NotADirectoryError):
             return None
         except OSError as e:
-            if self._fatal(e) or (self.is_mac and not isinstance(e, PermissionError)
-                                  and not self.session.ssh_alive()):
-                raise  # for a Mac the guard turns this into MacUnreachable
-            log.warning("cannot list %s %s: %r (skipped)", self.name, rel or ".", e)
-            if skipped is not None:
-                skipped.append(rel)
+            self._skip(e, rel, skipped, quiet)
             return None
 
-    def walk(self, sub: str = "", recursive: bool = True,
-             skipped: list[str] | None = None) -> Iterator[Entry]:
+    def walk(self, sub: str = "", recursive: bool = True, skipped: list[str] | None = None,
+             quiet: bool = False) -> Iterator[Entry]:
+        """Every file under `sub`. A folder that cannot be read (listing or stat-ing its entries
+        fails) is skipped whole, logged (unless `quiet`) and added to `skipped`."""
         stack = [(self.path(sub) if sub else self.root, sub)]
         while stack:
             folder, rel = stack.pop()
-            items = self._listing(folder, rel, skipped)
+            items = self._listing(folder, rel, skipped, quiet)
             if items is None:
                 continue
-            subdirs = []
-            for item in items:
-                if item.name.startswith("."):
-                    continue
-                child = f"{rel}/{item.name}" if rel else item.name
-                try:  # symlinks and junctions are never followed
-                    if item.is_dir(follow_symlinks=False):
-                        if recursive and not rules.is_skipped_dir(item.name):
-                            subdirs.append((Path(item.path), child))
-                    elif item.is_file(follow_symlinks=False):
-                        st = item.stat(follow_symlinks=False)
-                        yield Entry(child, st.st_size, st.st_mtime)
-                except FileNotFoundError:
-                    continue  # vanished while walking
+            subdirs, files = [], []
+            try:
+                for item in items:
+                    if item.name.startswith("."):
+                        continue
+                    child = f"{rel}/{item.name}" if rel else item.name
+                    try:  # symlinks and junctions are never followed
+                        if item.is_dir(follow_symlinks=False):
+                            if recursive and not rules.is_skipped_dir(item.name):
+                                subdirs.append((Path(item.path), child))
+                        elif item.is_file(follow_symlinks=False):
+                            st = item.stat(follow_symlinks=False)
+                            files.append(Entry(child, st.st_size, st.st_mtime))
+                    except FileNotFoundError:
+                        continue  # vanished while walking
+            except OSError as e:
+                self._skip(e, rel, skipped, quiet)
+                continue
+            yield from files
             stack.extend(reversed(subdirs))
 
-    def walk_dirs(self, sub: str = "", skipped: list[str] | None = None) -> Iterator[Entry]:
+    def walk_dirs(self, sub: str = "", skipped: list[str] | None = None,
+                  quiet: bool = False) -> Iterator[Entry]:
         """Every real folder under `sub` (never the start folder, dot-folders, package folders or
         symlinks), children before their parents; size is 0 and mtime is the folder's own, read
-        before any removal. A folder that cannot be listed is left out together with its ancestors
+        before any removal. A folder that cannot be read is left out together with its ancestors
         (it is not known to be empty) and added to `skipped`."""
         found: list[Entry] = []
         bad: list[str] = []
         stack = [(self.path(sub) if sub else self.root, sub)]
         while stack:
             folder, rel = stack.pop()
-            items = self._listing(folder, rel, bad)
+            items = self._listing(folder, rel, bad, quiet)
             if items is None:
                 continue
-            for item in items:
-                if rules.is_skipped_dir(item.name):
-                    continue
-                try:
-                    if not item.is_dir(follow_symlinks=False):
+            here: list[tuple[Entry, Path]] = []
+            try:
+                for item in items:
+                    if rules.is_skipped_dir(item.name):
                         continue
-                    child = f"{rel}/{item.name}" if rel else item.name
-                    found.append(Entry(child, 0, item.stat(follow_symlinks=False).st_mtime))
-                except FileNotFoundError:
-                    continue
-                stack.append((Path(item.path), child))
+                    try:
+                        if not item.is_dir(follow_symlinks=False):
+                            continue
+                        child = f"{rel}/{item.name}" if rel else item.name
+                        entry = Entry(child, 0, item.stat(follow_symlinks=False).st_mtime)
+                    except FileNotFoundError:
+                        continue
+                    here.append((entry, Path(item.path)))
+            except OSError as e:
+                self._skip(e, rel, bad, quiet)
+                continue
+            for entry, path in here:
+                found.append(entry)
+                stack.append((path, entry.relpath))
         if skipped is not None:
             skipped.extend(bad)
         blocked = lambda r: any(r == b or b.startswith(r + "/") for b in bad)
@@ -373,14 +394,15 @@ class MacLocation(LocalLocation):
         return self.session.reachable()
 
     @_mac_guard
-    def walk(self, sub: str = "", recursive: bool = True,
-             skipped: list[str] | None = None) -> Iterator[Entry]:
+    def walk(self, sub: str = "", recursive: bool = True, skipped: list[str] | None = None,
+             quiet: bool = False) -> Iterator[Entry]:
         # materialised so that errors surface here, inside the guard
-        return iter(list(super().walk(sub, recursive, skipped)))
+        return iter(list(super().walk(sub, recursive, skipped, quiet)))
 
     @_mac_guard
-    def walk_dirs(self, sub: str = "", skipped: list[str] | None = None) -> Iterator[Entry]:
-        return iter(list(super().walk_dirs(sub, skipped)))
+    def walk_dirs(self, sub: str = "", skipped: list[str] | None = None,
+                  quiet: bool = False) -> Iterator[Entry]:
+        return iter(list(super().walk_dirs(sub, skipped, quiet)))
 
     stat = _mac_guard(LocalLocation.stat)
     rmdir = _mac_guard(LocalLocation.rmdir)

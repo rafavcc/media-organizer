@@ -182,7 +182,11 @@ def _remove_empty_folders(loc: Location, cfg: Config, res: ScanResult, dry_run: 
         junk = [n for n in names if n.lower() in JUNK_NAMES]
         if len(junk) != len(names):
             continue  # holds something else
-        if not all(loc.is_plain_file(f"{folder.relpath}/{n}") for n in junk):
+        try:
+            plain = all(loc.is_plain_file(f"{folder.relpath}/{n}") for n in junk)
+        except OSError:
+            continue
+        if not plain:
             continue  # a folder or link named like junk: delete nothing
         if dry_run:
             res.would_remove.append(folder.relpath)
@@ -242,7 +246,7 @@ def refresh_folders(con, loc: Location) -> None:
         "SELECT relpath FROM items WHERE location=? AND status IN ('done','skipped','rejected')",
         (loc.name,))}
     stats: dict[str, list[int]] = {}
-    for entry in loc.walk():
+    for entry in loc.walk(quiet=True):  # unreadable folders were logged by the scan itself
         folder = entry.relpath.split("/", 1)[0] if "/" in entry.relpath else "."
         row = stats.setdefault(folder, [0, 0, 0])
         row[0] += entry.size
