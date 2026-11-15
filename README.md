@@ -3,7 +3,7 @@
 A service that runs on the Windows 11 PC (inside Ubuntu in WSL2) and makes your photos and videos smaller. It has three rules:
 
 1. **Compress in place.** Every video and image in the D: library (`D:\7_XYZ`) and in the iCloud `MEGA` folder on the Mac is converted next to the original: videos to H.265 `.mp4`, images to `.webp`. The new file is named `<name>_compressed.<ext>`. Resolution is never lowered.
-2. **Downloads are swept.** Every 6 hours it takes the images and videos from the top level of the Windows Downloads folder and the Mac Downloads folder (not subfolders). A video bigger than 400 MB goes to `D:\7_XYZ\_TO_CONVERT`; every other video and all images go to `MEGA/TBC`, compressed on the way.
+2. **Downloads are swept.** Every 6 hours it takes the images and videos from the top level of the Windows Downloads folder and the Mac Downloads folder (not subfolders). A video bigger than 400 MB goes to `D:\7_XYZ\_TO_CONVERT`; every other video and all images go to `MEGA/TBC`, compressed on the way (`.webp` files are only moved there, never converted).
 3. **Originals are deleted** once the new file is verified. There is no backup and no Recycle Bin. A file is only replaced when all of this is true:
    - the new file is at most 75% of the original size (otherwise nothing is gained and the original stays);
    - it has the same width and height, the same number of audio tracks and (video) the same length within 1 second; images must also look the same (similarity score at least 0.95);
@@ -38,8 +38,13 @@ Everything below is typed in the Ubuntu (WSL) terminal unless it says PowerShell
   It already does on this PC. If you ever change it, run `wsl --shutdown` in PowerShell.
 - **Tools** (the program checks them at start and lists what is missing):
   `sudo apt install webp ffmpeg libimage-exiftool-perl imagemagick sshfs` (ffmpeg must include `libx265`; Ubuntu's does).
-- **The Mac** (needed for MEGA and the Mac Downloads): set it up as described in section 9 ("Mac version") of the old tool's README, `../app_compactor/README.md`: Remote Login, full disk access for remote users, a fixed IP (192.168.0.30), an ssh key, and a `Host mac` entry in `~/.ssh/config`. Check it with `ssh mac true` (it must return without asking for a password). You do **not** mount anything by hand: the service mounts the Mac itself at `~/.local/share/media-organizer/mac`. The Mac must also have `brctl` (it does; it is part of macOS).
-- **WSL clock.** If WSL's clock is wrong (for example 3 hours ahead), see "WSL clock 3 hours ahead" at the end of the same old README. The program waits fixed times before deleting on the Mac, so a jumping clock is a risk.
+- **The Mac** (needed for MEGA and the Mac Downloads): 
+  - On the Mac: System Settings, General, Sharing: turn on **Remote Login**, and in its info button turn on **Allow full disk access for remote users**. Give the Mac a fixed IP in your router (192.168.0.30).
+  - In WSL: `sudo apt install sshfs`, then create an ssh key if you have none (`ssh-keygen -t ed25519`, empty passphrase), add this to `~/.ssh/config` (`Host mac`, `HostName 192.168.0.30`, `User` your Mac user name, `IdentityFile ~/.ssh/id_ed25519`, `ServerAliveInterval 15`) and run `ssh-copy-id mac`.
+  - Check with `ssh mac true`: it must return without asking for a password.
+  - More detail: section 9 ("Mac version") of the old tool's README, `../app_compactor/README.md`.
+  - The service mounts the Mac itself at `~/.local/share/media-organizer/mac`; you only mount it by hand to preview MEGA (see first-run step 3). The Mac needs `brctl`, which is part of macOS.
+- **WSL clock.** If WSL's clock is wrong (for example 3 hours ahead), see "WSL clock 3 hours ahead" at the end of the same old README. (Mac waiting times are measured against a time read from the Mac, so this matters less than it did, but a wrong clock still confuses logs and file dates.)
 - **D: must be mounted in WSL.** Check: `ls /mnt/d/7_XYZ` should list your folders. An unmounted D: looks like an empty library and shows up as "0 files" in a scan.
 
 Everything is run from the repository folder. To avoid typing the long form, add this alias once:
@@ -82,20 +87,56 @@ The first full pass over the roughly 860 GB in D: takes **days to weeks**. That 
 
    This changes nothing and writes nothing to the real database. It prints lines like `WOULD QUEUE d Some/Folder/clip.mp4 812.3 MB` and `WOULD MOVE win_dl big.mkv -> ...`, then one summary per place: `d: 1488 would queue, 0 would move`. The four places are `d` (D: library), `mega`, `win_dl` (Windows Downloads) and `mac_dl` (Mac Downloads). What to look for:
    - `d: 0 would queue` when you know D: is full of videos means D: is not mounted. Stop and fix that.
-   - `SKIP mega (unreachable)` or `SKIP mac_dl (unreachable)` means the Mac is not reachable or not mounted yet. A dry run never mounts the Mac. Either accept that, or start the service (step 5) and run the dry run again later.
+   - `SKIP mega (unreachable)` or `SKIP mac_dl (unreachable)` is what you see unless the Mac is already mounted: a dry run never mounts it. To preview MEGA, run `ssh mac true`, then mount it as the old README describes and run the dry run again:
+
+     ```bash
+     mkdir -p ~/.local/share/media-organizer/mac
+     sshfs mac: ~/.local/share/media-organizer/mac -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3
+     ```
+
+     (This is the same mount the service makes; the dry run only recognises a Mac mounted at exactly that place. The old README mounts it elsewhere, which does not help here.) Unmount afterwards with `fusermount -u ~/.local/share/media-organizer/mac`. Do not start the service for this: the service deletes originals.
    - Names in `_compressed` and files in subfolders of Downloads must not appear.
 
 4. **Stop the old cron job** (`pipeline.py`) so two programs never work on `_TO_CONVERT` at once:
 
    ```bash
+   crontab -l > ~/crontab-before.txt   # save a copy first, for an exact rollback
    crontab -l          # shows your scheduled jobs; find the line containing pipeline.py
    crontab -e          # opens them in an editor; delete that line (or put # in front), save, exit
    crontab -l          # check the line is gone
    ```
 
-   **Rollback:** stop the service (`systemctl --user disable --now media-organizer`), run `crontab -e` again and put the line back. Keep the old scripts in place for a month as a fallback.
+   **Rollback:** stop the service (`systemctl --user disable --now media-organizer`), run `crontab -e` again and put the line back (your saved copy is `~/crontab-before.txt`). Keep the old scripts in place for a month as a fallback.
 
-5. **Install and start the service.**
+5. **Staged trials on copies (do not skip).** The program deletes originals, and it has not yet been run on real data (see "Status of this release"). Run it first against throw-away copies, with its own settings file and its own state folder, so the real database stays untouched. Create `~/media-organizer-trial.toml`:
+
+   ```toml
+   d_root = "/mnt/d/_trial"
+   win_downloads = "/mnt/c/Users/rafavcc/trial-downloads"
+   mac_mega = "Library/Mobile Documents/com~apple~CloudDocs/MEGA/MEGA_TRIAL"
+   mac_downloads = "Downloads/trial"
+   mega_intake = "TBC"
+   state_dir = "~/.local/share/media-organizer-trial"
+   web_port = 8766
+   web_password = "trial"
+   ```
+
+   Paths of the Windows side (`d_root`, `win_downloads`, `state_dir`) are full Linux paths; `mac_mega` and `mac_downloads` are relative to the Mac's home folder; `mega_intake` is a folder inside `mac_mega`. Run a trial in the foreground:
+
+   ```bash
+   python3 -m media_organizer.cli --config ~/media-organizer-trial.toml run --no-web
+   ```
+
+   Press Ctrl+C to stop it: the current item is put back in the queue (or finished) and nothing is lost. In another terminal, `python3 -m media_organizer.cli --config ~/media-organizer-trial.toml status` shows progress. Files must be at least 10 minutes old to be picked up. Afterwards check: `status` shows no unexpected errors; each converted file plays (on the iPhone and the Mac); and an original is gone only where its `_compressed` file exists. Do the four trials in this order, changing the trial config each time:
+
+   1. **A copied folder** of about 10 mixed files (videos and images) at `/mnt/d/_trial/` (`d_root` as above). Copy them with Windows Explorer or `cp -r`.
+   2. **One person's folder on D:**: set `d_root = "/mnt/d/7_XYZ/<that folder>"` (the real files, so first make sure you have a backup of it).
+   3. **One MEGA subfolder with online-only files:** set `mac_mega` to that subfolder (for example `.../MEGA/MEGA_TRIAL`). Check the Mac's free disk space before and after (it should not grow by more than a few files).
+   4. **One file through each Downloads route:** put into the trial `win_downloads` (and the Mac's `Downloads/trial`) a video over 400 MB, a small video and an image, and check that the big video lands in `_trial/_TO_CONVERT` and the others in the trial MEGA `TBC` folder.
+
+   Enable the real service (next step) **only after all four trials look right.** Do not run a trial and the real service on the same folders at the same time.
+
+6. **Install and start the service.**
 
    ```bash
    mkdir -p ~/.config/systemd/user
@@ -106,9 +147,9 @@ The first full pass over the roughly 860 GB in D: takes **days to weeks**. That 
    systemctl --user status media-organizer
    ```
 
-   `loginctl enable-linger` lets the service keep running with no terminal open. The last command should show `active (running)`. (Copy the unit, do not link it: files on `/mnt/c` look executable and world-writable to systemd, which complains.) If you move the repository, edit `WorkingDirectory=` in the unit.
+   `loginctl enable-linger` lets the service keep running with no terminal open. The last command should show `active (running)`. If you do not want to start it yet, use `systemctl --user enable media-organizer` without `--now`. (Copy the unit, do not link it: files on `/mnt/c` look executable and world-writable to systemd, which complains.) If you move the repository, edit `WorkingDirectory=` in the unit.
 
-6. **Open the dashboard** at `http://192.168.0.33:8765` (user name: anything; password: the one from step 1). See the next sections for other devices. After a minute `media-organizer status` should show scans completing.
+7. **Open the dashboard** on the PC at `http://localhost:8765` (user name: anything; password: the one from step 1). Use the `192.168.0.33` address only from other devices, after "Opening the dashboard from other devices". You should see a page asking for the password. A blank page or a timeout means the service is not running: check `systemctl --user status media-organizer`. After a minute `media-organizer status` should show scans completing.
 
 ## Daily use
 
@@ -119,7 +160,7 @@ All from the repository folder:
 | `media-organizer status` | Summary: first-pass progress, space freed, D: free space, queue, what is encoding now, last scan of each place, problem counts |
 | `media-organizer status --errors` | Lists the files in error, with the error text |
 | `media-organizer status --json` | The same data as JSON |
-| `media-organizer pause` | Stop starting new work (a running encode is finished or put back); the service keeps running |
+| `media-organizer pause` | Stop starting new items; an encode already running finishes. The service keeps running |
 | `media-organizer resume` | Carry on |
 | `media-organizer retry-errors` | Put every file in `error` back in the queue |
 | `media-organizer scan --dry-run` | Preview, as in the first run |
@@ -137,7 +178,7 @@ Problems     3 errors · 222 no-gain · 7 low-quality      (media-organizer stat
 
 Other things you can do:
 
-- **Dashboard:** `http://192.168.0.33:8765`. Read-only: space freed, D: free space, milestones, progress, a chart, the biggest folders, recent conversions and problems. It still works when the Mac is off (MEGA figures are from the last scan). Pause, resume and retry are only available on the command line.
+- **Dashboard:** `http://localhost:8765` on the PC, `http://192.168.0.33:8765` from other devices. Read-only: space freed, D: free space, milestones, progress, a chart, the biggest folders, recent conversions and problems. It still works when the Mac is off (MEGA figures are from the last scan). Pause, resume and retry are only available on the command line.
 - **Log:** `~/.local/share/media-organizer/organizer.log` (rotated, 5 files of 5 MB). Follow it with `tail -f ~/.local/share/media-organizer/organizer.log`, or `journalctl --user -u media-organizer -f`.
 - **Service:** `systemctl --user stop|start|restart media-organizer`. Stop waits up to 60 seconds for the running encode to be put back cleanly.
 - **When things are scanned:** the intake folders (`D:\_TO_CONVERT`, `MEGA/TBC`) and both Downloads folders every 6 hours; both whole libraries once a week; Mac scans are retried every hour while the Mac is away.
@@ -156,19 +197,19 @@ The dashboard listens on port 8765 inside WSL. By default only the PC itself can
 networkingMode=mirrored
 ```
 
-Then in PowerShell run `wsl --shutdown` and open Ubuntu again. WSL now shares the PC's address. If another device still cannot connect, allow the port through the firewall with the firewall command from (b).
+Then in PowerShell run `wsl --shutdown` and open Ubuntu again. WSL now shares the PC's address. This path is **untested** here: in mirrored mode inbound connections can also be blocked by the Hyper-V firewall, so the Windows Defender rule alone may not be enough. If another device cannot connect, use option (b) instead.
 
 **(b) Port forwarding.** In PowerShell **as administrator**:
 
 ```powershell
 $wsl = (wsl hostname -I).Trim().Split(" ")[0]
 netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=8765 connectaddress=$wsl connectport=8765
-New-NetFirewallRule -DisplayName "Media organizer dashboard" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow -Profile Private
+New-NetFirewallRule -DisplayName "Media organizer dashboard" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow -Profile Private -RemoteAddress LocalSubnet
 ```
 
 WSL's own address changes after a restart, so the rule must be redone then: run `netsh interface portproxy delete v4tov4 listenaddress=0.0.0.0 listenport=8765` and the first two lines again. Check it with `netsh interface portproxy show all`. (Do not use this together with mirrored networking.)
 
-Test from the Mac or iPhone: `http://192.168.0.33:8765`.
+Test on the PC first with `http://localhost:8765`, then from the Mac or iPhone with `http://192.168.0.33:8765`.
 
 **Security:** the dashboard is protected only by the password, sent unencrypted (plain HTTP), and it shows file and folder names. It is for the home network only. Never forward the port on the router and do not reuse an important password.
 
@@ -178,10 +219,10 @@ WSL shuts down by itself a little after the last terminal closes, and then the s
 
 1. In PowerShell run `wsl -l -v` and note your distribution name (for example `Ubuntu`).
 2. Open Task Scheduler, **Create Task**. Name: `Keep WSL alive`.
-3. General: tick **Hidden**. Trigger: **At log on**. Action: **Start a program**, program `wsl.exe`, arguments `-d Ubuntu --exec /bin/sleep infinity` (use your distro name).
+3. General: choose **Run whether user is logged on or not** (so no console window appears) and tick **Hidden**. Trigger: **At log on**. Action: **Start a program**, program `wsl.exe`, arguments `-d Ubuntu --exec /bin/sleep infinity` (use your distro name).
 4. Conditions: untick "Start the task only if the computer is on AC power" if this is a laptop. Settings: untick "Stop the task if it runs longer than".
 
-Together with `loginctl enable-linger $USER` (from first-run step 5), the service then starts with WSL and survives closing every terminal. To test, run `wsl --shutdown`, wait a few seconds, start the task from Task Scheduler (right-click, Run) and check `systemctl --user status media-organizer` in a new Ubuntu window.
+Together with `loginctl enable-linger $USER` (from first-run step 6), the service then starts with WSL and survives closing every terminal. To test, run `wsl --shutdown`, wait a few seconds, start the task from Task Scheduler (right-click, Run) and check `systemctl --user status media-organizer` in a new Ubuntu window.
 
 ## What the statuses mean
 
@@ -218,7 +259,7 @@ Each file the program knows has a status, and often a reason. Statuses appear in
 - It never touches a file whose name ends in `_compressed` (any capitals).
 - It never deletes an original that changed since it was read, or one whose replacement is missing or the wrong size.
 - It never lowers resolution, and never uses lossless WebP.
-- It never writes anything into your folders except `<name>_compressed.<ext>` (first as a `.mo-part` file, renamed when complete).
+- Inside the libraries it only adds `<name>_compressed.<ext>` files (first as a `.mo-part` file, renamed when complete) and then removes the original. The only other places it writes are the delivery and routing folders (`_TO_CONVERT`, `_CONVERTED` with the sorter's results, `MEGA/TBC`).
 - It never changes anything from the dashboard: the dashboard only shows information.
 - It never moves files between the D: library and MEGA; the 400 MB rule applies to Downloads only.
 
@@ -241,11 +282,11 @@ Restart the service after a change: `systemctl --user restart media-organizer`. 
 
 ## Status of this release
 
-The automated tests only use temporary folders and tiny generated files. The program has **not yet been run on your real data**. The first runs on real data are staged on purpose:
+The automated tests only use temporary folders and tiny generated files. The program has **not yet been run on your real data**. That is why first-run step 5 stages the first runs on copies, in this order:
 
 1. a copied folder of about 10 mixed files;
 2. one person's folder on D:;
-3. one MEGA subfolder (watch the Mac's free disk space before and after);
+3. one MEGA subfolder with online-only files (watch the Mac's free disk space before and after);
 4. one file through each Downloads route (small video, big video, image; Windows and Mac).
 
-Play the results on the iPhone and the Mac. Only after these pass is the full first pass left running. Until then, treat the real libraries as untested, and keep the old scripts for a month.
+Play the results on the iPhone and the Mac. The real service is enabled only after all four look right. Until then, treat the real libraries as untested, and keep the old scripts for a month.
