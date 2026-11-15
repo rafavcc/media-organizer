@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import posixpath
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import db, rules
 from .config import Config
@@ -24,6 +24,7 @@ class ScanResult:
     moved: int = 0
     waiting: int = 0
     suspect: bool = False  # full scan walked nothing although rows exist: left untouched
+    would_move: list[tuple[str, str]] = field(default_factory=list)  # dry run only
 
 
 def _intake_folder(loc: Location, cfg: Config) -> str | None:
@@ -59,7 +60,10 @@ def _has_rows(con, location: str, under: str) -> bool:
                        (location, under, len(under) + 1, under + "/")).fetchone() is not None
 
 
-def scan_library(con, loc: Location, cfg: Config, *, sub: str = "", full: bool) -> ScanResult:
+def scan_library(con, loc: Location, cfg: Config, *, sub: str = "", full: bool,
+                 dry_run: bool = False) -> ScanResult:
+    """With dry_run, nothing is deleted or pruned and no folder statistics are written; candidate
+    rows still go to `con`, so the caller must pass a throwaway database."""
     res = ScanResult()
     if not loc.root.exists():
         return res
@@ -70,7 +74,7 @@ def scan_library(con, loc: Location, cfg: Config, *, sub: str = "", full: bool) 
         entries += 1
         name = posixpath.basename(entry.relpath)
         if full and name.endswith(".mo-part"):
-            if loc.now() - entry.mtime > STALE_PART_S:
+            if not dry_run and loc.now() - entry.mtime > STALE_PART_S:
                 try:
                     loc.delete(entry.relpath)
                 except FileNotFoundError:
@@ -104,13 +108,14 @@ def scan_library(con, loc: Location, cfg: Config, *, sub: str = "", full: bool) 
     if full and entries == 0 and _has_rows(con, loc.name, sub):
         res.suspect = True  # an unmounted drive looks like an empty folder: prune nothing
         return res
-    if full:
+    if full and not dry_run:
         db.prune_missing(con, location=loc.name, under=sub, seen=seen)
         refresh_folders(con, loc)
     return res
 
 
-def scan_downloads(con, loc: Location, locs: dict[str, Location], cfg: Config) -> ScanResult:
+def scan_downloads(con, loc: Location, locs: dict[str, Location], cfg: Config, *,
+                   dry_run: bool = False) -> ScanResult:
     res = ScanResult()
     if not loc.root.exists():
         return res
@@ -121,7 +126,7 @@ def scan_downloads(con, loc: Location, locs: dict[str, Location], cfg: Config) -
             continue
         res.found += 1
         if route == "d":
-            _move_to_d(loc, dest, entry, cfg, res)
+            _move_to_d(loc, dest, entry, cfg, res, dry_run)
             continue
         outcome = db.upsert_candidate(
             con, location=loc.name, relpath=entry.relpath, size=entry.size, mtime=entry.mtime,
@@ -135,12 +140,16 @@ def scan_downloads(con, loc: Location, locs: dict[str, Location], cfg: Config) -
     return res
 
 
-def _move_to_d(loc: Location, dest: Location, entry, cfg: Config, res: ScanResult) -> None:
+def _move_to_d(loc: Location, dest: Location, entry, cfg: Config, res: ScanResult,
+               dry_run: bool = False) -> None:
     if not dest.reachable():
         res.waiting += 1
         return
     name = rules.free_name(entry.relpath, lambda n: dest.exists(f"{cfg.d_intake}/{n}"))
     target = f"{cfg.d_intake}/{name}"
+    if dry_run:
+        res.would_move.append((entry.relpath, f"{dest.name}/{target}"))
+        return
     try:
         written = dest.publish(loc.path(entry.relpath), target, entry.mtime,
                                int(cfg.min_free_gb * GIB))

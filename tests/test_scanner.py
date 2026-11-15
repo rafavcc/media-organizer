@@ -327,3 +327,45 @@ class RefreshFoldersTests(ScannerCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DryRunTests(ScannerCase):
+    def locs(self):
+        return {"d": self.d, "win_dl": self.dl}
+
+    def test_library_dry_run_keeps_parts_and_rows(self):
+        gone = self.cfg.d_root / "a" / "gone.mp4"
+        write(gone)
+        scan_library(self.con, self.d, self.cfg, full=True)
+        gone.unlink()
+        stale = write(self.cfg.d_root / "a" / "x.mp4.mo-part", mtime=time.time() - 3 * 86400)
+        write(self.cfg.d_root / "a" / "new.png")
+        self.con.execute("DELETE FROM folders")
+        res = scan_library(self.con, self.d, self.cfg, full=True, dry_run=True)
+        self.assertTrue(stale.exists())
+        self.assertEqual(res.queued, 1)
+        rels = [r["relpath"] for r in self.rows()]
+        self.assertIn("a/gone.mp4", rels)  # not pruned
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM folders").fetchone()[0], 0)
+
+    def test_downloads_dry_run_moves_nothing(self):
+        big = self.cfg.win_downloads / "big.mp4"
+        with open(big, "wb") as f:
+            f.truncate(400 * MIB + 1)
+        age(big)
+        write(self.cfg.win_downloads / "pic.png")
+        res = scan_downloads(self.con, self.dl, self.locs(), self.cfg, dry_run=True)
+        self.assertTrue(big.exists())
+        self.assertFalse((self.cfg.d_root / "_TO_CONVERT").exists())
+        self.assertEqual(res.would_move, [("big.mp4", "d/_TO_CONVERT/big.mp4")])
+        self.assertEqual((res.moved, res.queued), (0, 1))
+        self.assertEqual([r["relpath"] for r in self.rows()], ["pic.png"])
+
+    def test_downloads_dry_run_avoids_name_collision(self):
+        big = self.cfg.win_downloads / "big.mp4"
+        with open(big, "wb") as f:
+            f.truncate(400 * MIB + 1)
+        age(big)
+        write(self.cfg.d_root / "_TO_CONVERT" / "big.mp4")
+        res = scan_downloads(self.con, self.dl, self.locs(), self.cfg, dry_run=True)
+        self.assertEqual(res.would_move, [("big.mp4", "d/_TO_CONVERT/big (1).mp4")])
