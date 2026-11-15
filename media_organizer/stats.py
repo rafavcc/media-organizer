@@ -15,6 +15,7 @@ ETA_WINDOW_DAYS = 3
 FOLDER_LIMIT = 15
 RECENT_LIMIT = 50
 PROBLEM_ITEM_LIMIT = 100
+STUCK_PUBLISHED_S = 3600
 FINISHED = ("done", "skipped", "rejected", "error")
 
 
@@ -38,10 +39,12 @@ def _disk(con, cfg: Config) -> dict:
     usage = _disk_usage(cfg.d_root) if cfg.d_root.exists() else None
     snap = con.execute("SELECT free_bytes FROM snapshots WHERE location='d' "
                        "ORDER BY ts DESC, rowid DESC LIMIT 1").fetchone()
-    if snap is not None:
+    if usage:
+        d_free = usage.free  # live; the snapshot only lags behind the weekly scan
+    elif snap is not None:
         d_free = int(snap["free_bytes"] or 0)
     else:
-        d_free = usage.free if usage else 0
+        d_free = 0
     latest = con.execute("SELECT total_bytes FROM snapshots WHERE location='mega' "
                          "ORDER BY ts DESC, rowid DESC LIMIT 1").fetchone()
     earliest = con.execute("SELECT total_bytes FROM snapshots WHERE location='mega' "
@@ -105,13 +108,16 @@ def _current(con):
     return value if isinstance(value, dict) and value else None
 
 
-def _queue(con) -> dict:
-    def count(where: str) -> int:
-        return con.execute(f"SELECT COUNT(*) AS n FROM items WHERE status='queued' AND {where}"
-                           ).fetchone()["n"]
+def _queue(con, now: float) -> dict:
+    def count(where: str, args=()) -> int:
+        return con.execute(f"SELECT COUNT(*) AS n FROM items WHERE status='queued' AND {where}",
+                           args).fetchone()["n"]
     return {"downloads": count("source='downloads'"), "intake": count("source='intake'"),
             "mega": count("source='library' AND location='mega'"),
-            "library": count("source='library' AND location='d'")}
+            "library": count("source='library' AND location='d'"),
+            "no_space": count("not_before > ? AND reason='no-space'", (now,)),
+            "evict_pending": con.execute("SELECT COUNT(*) AS n FROM items WHERE evict_pending=1"
+                                         ).fetchone()["n"]}
 
 
 def _scans(con) -> list[dict]:
@@ -134,12 +140,15 @@ def _folders(con, location: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def _problems(con) -> dict:
+def _problems(con, now: float) -> dict:
     out = {"error": con.execute("SELECT COUNT(*) AS n FROM items WHERE status='error'"
                                 ).fetchone()["n"]}
-    for reason in ("no-gain", "low-quality", "changed"):
+    for reason in ("no-gain", "low-quality", "changed", "multi-frame"):
         out[reason] = con.execute("SELECT COUNT(*) AS n FROM items WHERE status='rejected' "
                                   "AND reason=?", (reason,)).fetchone()["n"]
+    out["stuck_published"] = con.execute(
+        "SELECT COUNT(*) AS n FROM items WHERE status='published' "
+        "AND COALESCE(finished_at, started_at) < ?", (now - STUCK_PUBLISHED_S,)).fetchone()["n"]
     rows = con.execute("SELECT location, relpath, reason, error FROM items WHERE status='error' "
                        "ORDER BY finished_at DESC, id DESC LIMIT ?", (PROBLEM_ITEM_LIMIT,))
     out["items"] = [dict(r) for r in rows]
@@ -164,10 +173,10 @@ def summary(con, cfg: Config, now: float | None = None) -> dict:
         "daily": _daily(con, generated),
         "now": _current(con),
         "paused": db.meta_get(con, "paused") == "1",
-        "queue": _queue(con),
+        "queue": _queue(con, generated),
         "scans": _scans(con),
         "mac_reachable": db.meta_get(con, "mac_reachable") == "1",
         "folders": {"d": _folders(con, "d"), "mega": _folders(con, "mega")},
         "recent": [dict(r) for r in recent],
-        "problems": _problems(con),
+        "problems": _problems(con, generated),
     }

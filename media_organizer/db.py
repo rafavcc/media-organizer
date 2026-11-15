@@ -14,7 +14,9 @@ CREATE TABLE IF NOT EXISTS items(
   priority INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'queued', reason TEXT, settings TEXT,
   dest_location TEXT, dest_dir TEXT, final_relpath TEXT, final_size INTEGER,
   was_online_only INTEGER NOT NULL DEFAULT 0, not_before REAL, attempts INTEGER NOT NULL DEFAULT 0,
-  error TEXT, started_at REAL, finished_at REAL, UNIQUE(location, relpath));
+  error TEXT, started_at REAL, finished_at REAL,
+  evict_pending INTEGER NOT NULL DEFAULT 0, finalize_fails INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(location, relpath));
 CREATE INDEX IF NOT EXISTS items_queue ON items(status, kind, priority, size DESC);
 CREATE TABLE IF NOT EXISTS conversions(id INTEGER PRIMARY KEY, ts REAL NOT NULL,
   location TEXT NOT NULL, relpath TEXT NOT NULL, kind TEXT NOT NULL,
@@ -31,8 +33,11 @@ CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 ITEM_COLUMNS = {
     "location", "relpath", "size", "mtime", "kind", "source", "priority", "status", "reason",
     "settings", "dest_location", "dest_dir", "final_relpath", "final_size", "was_online_only",
-    "not_before", "attempts", "error", "started_at", "finished_at",
+    "not_before", "attempts", "error", "started_at", "finished_at", "evict_pending",
+    "finalize_fails",
 }
+NEW_COLUMNS = {"evict_pending": "INTEGER NOT NULL DEFAULT 0",
+               "finalize_fails": "INTEGER NOT NULL DEFAULT 0"}
 TERMINAL = ("done", "skipped", "rejected", "error")
 
 
@@ -45,6 +50,14 @@ def open_db(path: Path) -> sqlite3.Connection:
     con.execute("PRAGMA busy_timeout=30000")
     con.execute("PRAGMA journal_mode=WAL")
     con.executescript(SCHEMA)
+    have = {r["name"] for r in con.execute("PRAGMA table_info(items)")}
+    for column, decl in NEW_COLUMNS.items():
+        if column not in have:  # a database created before this column existed
+            try:
+                con.execute(f"ALTER TABLE items ADD COLUMN {column} {decl}")
+            except sqlite3.OperationalError:
+                if column not in {r["name"] for r in con.execute("PRAGMA table_info(items)")}:
+                    raise  # another connection may have added it first
     return con
 
 
@@ -79,8 +92,8 @@ def upsert_candidate(con, *, location, relpath, size, mtime, kind, source, prior
             if same_file:
                 return "known"
             # the file changed, so a recorded publish belongs to the old content
-            con.execute("UPDATE items SET size=?, mtime=?, final_relpath=NULL, final_size=NULL "
-                        "WHERE id=?", (size, mtime, row["id"]))
+            con.execute("UPDATE items SET size=?, mtime=?, final_relpath=NULL, final_size=NULL, "
+                        "not_before=NULL, reason=NULL WHERE id=?", (size, mtime, row["id"]))
             return "requeued"
         if same_file and (status not in ("skipped", "rejected") or row["settings"] == settings):
             return "known"
@@ -132,20 +145,23 @@ def planned_names(con, location: str, folder: str, exclude_id: int | None = None
     for r in rows:
         head, _, name = r["final_relpath"].rpartition("/")
         if head == folder:
-            names.add(name)
+            names.add(name.casefold())
     return names
 
 
-def claim_next(con, *, kind: str, exclude_locations: Collection[str]):
+def claim_next(con, *, kind: str, exclude_locations: Collection[str],
+               now: float | None = None):
+    now = time.time() if now is None else now
     excluded = list(exclude_locations)
     marks = ",".join("?" * len(excluded))
     clause = (f" AND location NOT IN ({marks}) AND (dest_location IS NULL "
               f"OR dest_location NOT IN ({marks}))") if excluded else ""
     with _tx(con):
         row = con.execute(
-            "SELECT id FROM items WHERE status='queued' AND kind=?" + clause +
+            "SELECT id FROM items WHERE status='queued' AND kind=? "
+            "AND (not_before IS NULL OR not_before <= ?)" + clause +
             " ORDER BY priority ASC, size DESC, id ASC LIMIT 1",
-            (kind, *excluded, *excluded)).fetchone()
+            (kind, now, *excluded, *excluded)).fetchone()
         if row is None:
             return None
         con.execute("UPDATE items SET status='running', attempts=attempts+1, started_at=? "
@@ -175,8 +191,8 @@ def reset_running(con) -> int:
 
 def retry_errors(con) -> int:
     with _tx(con):
-        return con.execute("UPDATE items SET status='queued', error=NULL "
-                           "WHERE status='error'").rowcount
+        return con.execute("UPDATE items SET status='queued', error=NULL, not_before=NULL, "
+                           "finalize_fails=0 WHERE status='error'").rowcount
 
 
 def delete_item(con, item_id: int) -> None:
@@ -187,12 +203,20 @@ def delete_item(con, item_id: int) -> None:
 def prune_missing(con, *, location: str, under: str, seen: set[str]) -> int:
     with _tx(con):
         rows = con.execute("SELECT id, relpath FROM items WHERE location=? "
-                           "AND status NOT IN ('running','published')", (location,)).fetchall()
+                           "AND status NOT IN ('running','published','done')", (location,)).fetchall()
         gone = [r["id"] for r in rows
                 if r["relpath"] not in seen
                 and (not under or r["relpath"] == under or r["relpath"].startswith(under + "/"))]
         con.executemany("DELETE FROM items WHERE id=?", [(i,) for i in gone])
         return len(gone)
+
+
+def bump_finalize_fails(con, item_id: int) -> int:
+    """Count one failed attempt to delete an original; returns the new total."""
+    with _tx(con):
+        con.execute("UPDATE items SET finalize_fails=finalize_fails+1 WHERE id=?", (item_id,))
+        row = con.execute("SELECT finalize_fails FROM items WHERE id=?", (item_id,)).fetchone()
+        return 0 if row is None else row["finalize_fails"]
 
 
 def log_conversion(con, *, ts, location, relpath, kind, bytes_before, bytes_after) -> None:

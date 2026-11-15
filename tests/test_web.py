@@ -82,6 +82,12 @@ class RouteTests(WebCase):
         for bad in (b"http://", b"https://", b"innerHTML"):
             self.assertNotIn(bad, body)
 
+    def test_dashboard_shows_waiting_release_and_stuck_counts(self):
+        text = PAGE.read_text()
+        for needle in ("q.no_space", "waiting for space", "q.evict_pending",
+                       "to release on the Mac", "p.stuck_published", 'p["multi-frame"]'):
+            self.assertIn(needle, text)
+
     def test_summary(self):
         status, headers, body = self.get("/api/summary", auth(PASSWORD))
         self.assertEqual(status, 200)

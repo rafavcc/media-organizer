@@ -171,14 +171,15 @@ class Service:
     # -- scheduling --
     def tick(self) -> None:
         up = lambda loc: not loc.is_mac or self.mac_up()
+        cached = lambda name: self.mac_up()  # one cached answer for both Mac locations
         # Before the scans too, so a long scan does not delay deleting originals or the sorter.
-        finalize_published(self.con, self.locs, self.cfg)
+        finalize_published(self.con, self.locs, self.cfg, cached)
         run_sorter(self.con, self.locs, self.cfg)
         for scan in due_scans(self.con, self.cfg, time.time()):
             if self.stop.is_set():
                 return
             run_scan(self.con, scan, self.locs, self.cfg, up, self._mac_down)
-        finalize_published(self.con, self.locs, self.cfg)
+        finalize_published(self.con, self.locs, self.cfg, cached)
         run_sorter(self.con, self.locs, self.cfg)
         db.meta_set(self.con, "mac_reachable", "1" if self.mac_up() else "0")
 
@@ -198,10 +199,6 @@ class Service:
         if item is None:
             return None
         is_video = kind == "video"
-        if is_video:
-            self.current = {"name": item["relpath"].rsplit("/", 1)[-1], "size": item["size"],
-                            "progress": 0.0, "location": item["location"]}
-            self._report(con, force=True)
 
         def on_progress(p: float) -> None:
             if self.stop.is_set():
@@ -210,6 +207,10 @@ class Service:
             self._report(con)
 
         try:
+            if is_video:
+                self.current = {"name": item["relpath"].rsplit("/", 1)[-1], "size": item["size"],
+                                "progress": 0.0, "location": item["location"]}
+                self._report(con, force=True)
             return worker.process_item(con, item, self.locs, self.cfg, self.cfg.work_dir,
                                        on_progress if is_video else None)
         except MacUnreachable:

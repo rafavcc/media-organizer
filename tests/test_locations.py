@@ -91,6 +91,30 @@ class LocalTests(unittest.TestCase):
         replace.assert_not_called()  # a short part must never reach the final name
         self.assertEqual(list(self.loc.root.rglob("*.bin*")), [])
 
+    def test_publish_part_names_are_unique_and_end_in_mo_part(self):
+        import re
+        src = self.tmp / "src.bin"
+        src.write_bytes(b"x" * 10)
+        seen = []
+        real = locations.shutil.copyfile
+
+        def spy(s, d):
+            seen.append(Path(d).name)
+            return real(s, d)
+        with mock.patch("media_organizer.locations.shutil.copyfile", spy):
+            self.loc.publish(src, "out.bin", None, 0)
+            self.loc.publish(src, "out2.bin", None, 0)
+            (self.loc.root / "out.bin").unlink()
+            self.loc.publish(src, "out.bin", None, 0)
+        self.assertTrue(all(re.fullmatch(r"out2?\.bin\.[0-9a-f]{8}\.mo-part", n) for n in seen), seen)
+        self.assertEqual(len(set(seen)), 3)
+
+    def test_list_names(self):
+        (self.loc.root / "a").mkdir(parents=True)
+        (self.loc.root / "a" / "IMG.JPG").write_bytes(b"1")
+        self.assertEqual(self.loc.list_names("a"), {"IMG.JPG"})
+        self.assertEqual(self.loc.list_names("missing"), set())
+
     def test_publish_never_overwrites(self):
         src = self.tmp / "src.bin"
         src.write_bytes(b"new")
@@ -217,6 +241,42 @@ class MacTests(unittest.TestCase):
                         side_effect=PermissionError(errno.EACCES, "denied")):
             with self.assertRaises(PermissionError):
                 loc.publish(src, "out.mp4", None, 0)
+
+    def test_eio_with_ssh_down_is_mac_unreachable(self):
+        runner = FakeRunner(rc=255)
+        loc, _ = mac_location(self.tmp, runner)
+        (loc.root / "f.mp4").write_bytes(b"data")
+        src = self.tmp / "src.bin"
+        src.write_bytes(b"1234")
+        boom = OSError(errno.EIO, "input/output error")
+        with mock.patch("media_organizer.locations.shutil.copyfile", side_effect=boom):
+            with self.assertRaises(MacUnreachable):
+                loc.fetch("f.mp4", self.tmp / "d.mp4")
+            with self.assertRaises(MacUnreachable):
+                loc.publish(src, "out.mp4", None, 0)
+        with mock.patch("media_organizer.locations.os.scandir", side_effect=boom):
+            with self.assertRaises(MacUnreachable):
+                list(loc.walk())
+        self.assertIn(["ssh", *locations.SSH_OPTS, "mac", "true"], runner.calls)
+
+    def test_eio_with_ssh_up_stays_oserror(self):
+        loc, _ = mac_location(self.tmp)
+        (loc.root / "f.mp4").write_bytes(b"data")
+        boom = OSError(errno.EIO, "input/output error")
+        with mock.patch("media_organizer.locations.shutil.copyfile", side_effect=boom):
+            with self.assertRaises(OSError) as cm:
+                loc.fetch("f.mp4", self.tmp / "d.mp4")
+        self.assertNotIsInstance(cm.exception, MacUnreachable)
+
+    def test_ssh_check_uses_ten_second_timeout(self):
+        seen = {}
+
+        def runner(argv, **kw):
+            seen.update(kw)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        loc, _ = mac_location(self.tmp, runner)
+        self.assertTrue(loc.session.ssh_alive())
+        self.assertEqual(seen["timeout"], 10)
 
     def test_evict(self):
         loc, runner = mac_location(self.tmp)

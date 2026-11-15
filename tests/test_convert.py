@@ -1,8 +1,9 @@
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
-from media_organizer import rules
+from media_organizer import probe, rules
 from media_organizer.convert import convert
 from media_organizer.encode import image_cmd, video_cmd
 from media_organizer.probe import VideoInfo, check_tools, gif_frames, probe_video, webp_frames, dims
@@ -116,6 +117,39 @@ class ConvertTests(unittest.TestCase):
         self.assertEqual(res.status, "ok", res.message)
         self.assertEqual(dims(res.out), dims(src))
         self.assertEqual([p for p in self.work.iterdir()], [res.out])
+
+    def _tiff(self, name, pages):
+        pngs = [make_image(self.src_dir / f"p{i}.png") for i in range(pages)]
+        out = self.src_dir / name
+        subprocess.run([probe.imagemagick(), *map(str, pngs), str(out)], check=True,
+                       capture_output=True)
+        return out
+
+    def test_multi_page_tiff_is_multi_frame(self):
+        src = self._tiff("a.tif", 2)
+        before = src.read_bytes()
+        res = self.run_convert(src)
+        self.assertEqual(res.status, "multi-frame", res.message)
+        self.assertIsNone(res.out)
+        self.assertEqual(src.read_bytes(), before)
+        self.assertEqual(list(self.work.iterdir()), [])
+
+    def test_single_page_tiff_converts(self):
+        src = self._tiff("a.tiff", 1)
+        res = self.run_convert(src)
+        self.assertEqual(res.status, "ok", res.message)
+
+    def test_apng_is_multi_frame(self):
+        src = self.src_dir / "a.png"
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+                        "testsrc2=size=64x64:rate=5:duration=1", "-f", "apng", str(src)],
+                       check=True, capture_output=True)
+        res = self.run_convert(src)
+        self.assertEqual(res.status, "multi-frame", res.message)
+        self.assertTrue(src.exists())
+
+    def test_plain_png_converts(self):
+        self.assertEqual(self.run_convert(make_image(self.src_dir / "p.png")).status, "ok")
 
     def test_gif_keeps_frames(self):
         src = make_gif(self.src_dir / "a.gif")

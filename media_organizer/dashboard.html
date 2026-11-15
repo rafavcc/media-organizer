@@ -228,8 +228,11 @@ function renderWork(s) {
   } else {
     kids.push(el("p", null, "Now: idle"));
   }
-  kids.push(el("p", "muted", "Queue: " + count(q.downloads) + " Downloads · " + count(q.intake) +
-               " inbox · " + count(q.mega) + " MEGA · " + count(q.library) + " library"));
+  var queue = "Queue: " + count(q.downloads) + " Downloads · " + count(q.intake) +
+               " inbox · " + count(q.mega) + " MEGA · " + count(q.library) + " library";
+  if (q.no_space) queue += " · " + count(q.no_space) + " waiting for space";
+  if (q.evict_pending) queue += " · " + count(q.evict_pending) + " to release on the Mac";
+  kids.push(el("p", "muted", queue));
   kids.push(el("p", "muted", "Last scans: " + s.scans.map(scanLine).join(" · ")));
   fill("work", kids);
 }
@@ -266,7 +269,9 @@ function renderRecent(s) {
 function renderProblems(s) {
   var p = s.problems;
   var kids = [el("p", null, count(p.error) + " errors · " + count(p["no-gain"]) + " no-gain · " +
-                 count(p["low-quality"]) + " low-quality · " + count(p.changed) + " changed")];
+                 count(p["low-quality"]) + " low-quality · " + count(p.changed) + " changed · " +
+                 count(p["multi-frame"]) + " multi-frame" +
+                 (p.stuck_published ? " · " + count(p.stuck_published) + " stuck (original not deleted)" : ""))];
   if (p.items.length) {
     kids.push(el("details", null, null, [
       el("summary", null, "Show " + p.items.length + " errors"),

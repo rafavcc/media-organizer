@@ -47,13 +47,18 @@ def format_status(s: dict, cfg: Config) -> str:
     if s["paused"]:
         lines.append("paused")
     fp, freed, disk = s["first_pass"], s["freed"], s["disk"]
-    lines.append(f"First pass   D: library   {fp['d']['done']:,} / {fp['d']['total']:,} videos   "
+    lines.append(f"First pass   D: library   {fp['d']['done']:,} / {fp['d']['total']:,} items   "
                  f"freed {freed['d'] / GIB:5.1f} GB   D: free {disk['d_free'] / GIB:.0f} GB")
     lines.append(f"             MEGA          {fp['mega']['done']:,} / {fp['mega']['total']:,} "
                  f"files  freed {freed['mega'] / GIB:5.1f} GB")
     q = s["queue"]
-    lines.append(f"Queue        {q['downloads']:,} Downloads · {q['intake']:,} inbox · "
-                 f"{q['mega']:,} MEGA · {q['library']:,} library")
+    queue = (f"Queue        {q['downloads']:,} Downloads · {q['intake']:,} inbox · "
+             f"{q['mega']:,} MEGA · {q['library']:,} library")
+    if q["no_space"]:
+        queue += f" · {q['no_space']:,} waiting for space"
+    if q["evict_pending"]:
+        queue += f" · {q['evict_pending']:,} to release on the Mac"
+    lines.append(queue)
     now = s["now"]
     if now:
         pct = f"  {now.get('progress', 0) * 100:.0f}%" if "progress" in now else ""
@@ -65,8 +70,12 @@ def format_status(s: dict, cfg: Config) -> str:
     texts = [_scan_text(x, scans[x["name"]], cfg) for x in s["scans"]]
     lines.append("Last scans   " + " · ".join(texts))
     p = s["problems"]
-    lines.append(f"Problems     {p['error']} errors · {p['no-gain']} no-gain · "
-                 f"{p['low-quality']} low-quality      (media-organizer status --errors)")
+    problems = (f"Problems     {p['error']} errors · {p['no-gain']} no-gain · "
+                f"{p['low-quality']} low-quality · {p['changed']} changed · "
+                f"{p['multi-frame']} multi-frame")
+    if p["stuck_published"]:
+        problems += f" · {p['stuck_published']} stuck (original not deleted)"
+    lines.append(problems + "      (media-organizer status --errors)")
     return "\n".join(lines)
 
 
@@ -121,6 +130,9 @@ def _dry_run(cfg: Config) -> int:
     try:
         for name in ("d", "mega", "win_dl", "mac_dl"):
             loc = locs[name]
+            if not loc.is_mac and not loc.root.exists():
+                print(f"SKIP {name} (missing)")
+                continue
             if not _already_up(loc):
                 print(f"SKIP {name} (unreachable)")
                 continue

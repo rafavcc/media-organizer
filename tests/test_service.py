@@ -153,6 +153,19 @@ class WorkTests(Base):
         self.assertEqual(db.meta_get(self.con, "sorter_dirty"), "1")
         self.assertFalse((self.tmp / "argv.txt").exists())
 
+    def test_sorter_ignores_errored_intake_rows_but_not_published(self):
+        self.cfg.sorter.write_text(STUB_SORTER)
+        make_video(self.d.root / "y.mp4")
+        self.queue(self.d, "y.mp4", source="intake", priority=1)
+        rid = self.row("y.mp4")["id"]
+        db.meta_set(self.con, "sorter_dirty", "1")
+        db.set_status(self.con, rid, "published", not_before=0)
+        self.assertFalse(service.run_sorter(self.con, self.locs, self.cfg))
+        self.assertFalse((self.tmp / "argv.txt").exists())
+        db.set_status(self.con, rid, "error", error="could not delete original: x")
+        self.assertTrue(service.run_sorter(self.con, self.locs, self.cfg))
+        self.assertTrue((self.tmp / "argv.txt").exists())
+
     def test_missing_sorter_clears_flag(self):
         db.meta_set(self.con, "sorter_dirty", "1")
         with self.assertLogs("media_organizer.service", "ERROR"):
@@ -283,6 +296,25 @@ class FixRound1Tests(Base):
         self.mega.reachable = self.mac_dl.reachable = lambda: self.fail("reachable() called")
         self.assertFalse(self.svc.mac_up())
         self.assertEqual(db.meta_get(self.con, "mac_reachable"), "0")
+
+    def test_failing_first_report_requeues_the_item(self):
+        make_video(self.d.root / "lib.mp4")
+        self.queue(self.d, "lib.mp4", source="library", priority=3)
+        with mock.patch.object(self.svc, "_report", side_effect=OSError("db locked")):
+            with self.assertRaises(OSError):
+                self.svc.work_once("video")
+        self.assertEqual(self.row("lib.mp4")["status"], "queued")
+
+    def test_tick_hands_the_cached_mac_state_to_finalize(self):
+        seen = []
+        self.set_mac(False)
+        with mock.patch.object(service, "finalize_published",
+                               side_effect=lambda con, locs, cfg, is_up=None: seen.append(is_up)):
+            self.svc.tick()
+        is_up = seen[0]
+        self.assertFalse(is_up("mega"))
+        self.mega.reachable = self.mac_dl.reachable = lambda: self.fail("reachable() called")
+        self.assertFalse(is_up("mega"))  # answered from the cache
 
     def test_tick_finalizes_and_sorts_before_and_after_scans(self):
         calls = []

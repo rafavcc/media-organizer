@@ -106,10 +106,22 @@ class LibraryScanTests(ScannerCase):
         write(self.cfg.d_root / "stale.mp4.mo-part", mtime=time.time() - 2 * 86400)
         write(self.cfg.d_root / "fresh.mp4.mo-part", mtime=time.time() - 3600)
         scan_library(self.con, self.d, self.cfg, full=True)
-        self.assertEqual([r["relpath"] for r in self.rows()], ["keep.mp4"])
+        # a done row is never pruned: its original is gone because we deleted it
+        self.assertEqual(sorted(r["relpath"] for r in self.rows()), ["gone.mp4", "keep.mp4"])
         self.assertFalse((self.cfg.d_root / "stale.mp4.mo-part").exists())
         self.assertTrue((self.cfg.d_root / "fresh.mp4.mo-part").exists())
         self.assertEqual(self.con.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0], 1)
+
+    def test_full_scan_still_prunes_skipped_and_rejected_rows_whose_file_is_gone(self):
+        age(make_video(self.cfg.d_root / "keep.mp4"))
+        for rel, status in (("skip.mp4", "skipped"), ("rej.mp4", "rejected"),
+                            ("done.mp4", "done")):
+            db.upsert_candidate(self.con, location="d", relpath=rel, size=5, mtime=1.0,
+                                kind="video", source="library", priority=3, settings="s")
+            rid = self.con.execute("SELECT id FROM items WHERE relpath=?", (rel,)).fetchone()["id"]
+            db.set_status(self.con, rid, status)
+        scan_library(self.con, self.d, self.cfg, full=True)
+        self.assertEqual(sorted(r["relpath"] for r in self.rows()), ["done.mp4", "keep.mp4"])
 
     def test_partial_scan_keeps_part_files(self):
         write(self.cfg.d_root / "stale.mp4.mo-part", mtime=time.time() - 2 * 86400)

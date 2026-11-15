@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import tempfile
 import time
 import unittest
@@ -92,6 +93,36 @@ class StatusTests(CliCase):
         self.assertIn("Problems", out)
 
 
+class StatusLineTests(CliCase):
+    def test_queue_and_problem_lines_show_the_new_counts(self):
+        con = self.db()
+        now = time.time()
+        for rel in ("a.mp4", "b.mp4", "c.mp4", "d.tif", "e.mp4"):
+            db.upsert_candidate(con, location="d", relpath=rel, size=5, mtime=1.0,
+                                kind="video", source="library", priority=3, settings="s")
+        ids = {r["relpath"]: r["id"] for r in con.execute("SELECT id, relpath FROM items")}
+        db.set_status(con, ids["a.mp4"], "queued", reason="no-space", not_before=now + 3000)
+        db.set_status(con, ids["b.mp4"], "queued", reason="no-space", not_before=now + 3000)
+        db.set_status(con, ids["c.mp4"], "done", evict_pending=1, finished_at=now)
+        db.set_status(con, ids["d.tif"], "rejected", reason="changed")
+        db.set_status(con, ids["e.mp4"], "published", started_at=now - 7200)
+        out = self.run_cli("status")[1]
+        queue = [l for l in out.splitlines() if l.startswith("Queue")][0]
+        self.assertIn("· 2 waiting for space", queue)
+        self.assertIn("· 1 to release on the Mac", queue)
+        problems = [l for l in out.splitlines() if l.startswith("Problems")][0]
+        self.assertIn("1 changed", problems)
+        self.assertIn("1 stuck", problems)
+        self.assertIn("items", out.split("MEGA")[0])
+        self.assertNotIn("videos", out)
+
+    def test_zero_counts_are_not_shown(self):
+        out = self.run_cli("status")[1]
+        self.assertNotIn("waiting for space", out)
+        self.assertNotIn("to release on the Mac", out)
+        self.assertNotIn("stuck", out)
+
+
 class RunTests(CliCase):
     def test_missing_tools(self):
         with mock.patch("media_organizer.cli.check_tools", return_value=["ffmpeg"]), \
@@ -149,6 +180,13 @@ class ScanTests(CliCase):
         code, out = self.run_cli("scan")
         self.assertEqual(code, 2)
         self.assertIn("service", out)
+
+    def test_dry_run_missing_local_root_says_skip(self):
+        shutil.rmtree(self.cfg.d_root, ignore_errors=True)
+        code, out = self.run_cli("scan", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("SKIP d (missing)", out)
+        self.assertNotIn("d: 0 would queue", out)
 
     def test_dry_run(self):
         old = time.time() - 3600

@@ -1,6 +1,8 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from media_organizer import db
 
@@ -167,7 +169,82 @@ class ClaimTests(DbTestCase):
         self.assertIsNone(row(self.con, "a"))
 
 
+class BackoffTests(DbTestCase):
+    def test_claim_skips_future_not_before(self):
+        add(self.con, "big", size=99)
+        add(self.con, "small", size=1)
+        db.set_status(self.con, row(self.con, "big")["id"], "queued", not_before=5000.0,
+                      reason="no-space")
+        got = db.claim_next(self.con, kind="video", exclude_locations=(), now=1000.0)
+        self.assertEqual(got["relpath"], "small")
+        self.assertIsNone(db.claim_next(self.con, kind="video", exclude_locations=(), now=1000.0))
+        got = db.claim_next(self.con, kind="video", exclude_locations=(), now=5000.0)
+        self.assertEqual(got["relpath"], "big")
+
+    def test_claim_default_now_is_time_time(self):
+        add(self.con, "a")
+        db.set_status(self.con, row(self.con, "a")["id"], "queued", not_before=time.time() + 3600)
+        self.assertIsNone(db.claim_next(self.con, kind="video", exclude_locations=()))
+        with mock.patch("media_organizer.db.time.time", return_value=time.time() + 7200):
+            self.assertIsNotNone(db.claim_next(self.con, kind="video", exclude_locations=()))
+
+    def test_upsert_requeued_clears_not_before(self):
+        add(self.con, "a")
+        db.set_status(self.con, row(self.con, "a")["id"], "queued", not_before=9e9,
+                      reason="no-space")
+        self.assertEqual(add(self.con, "a", size=11), "requeued")
+        self.assertIsNone(row(self.con, "a")["not_before"])
+        db.set_status(self.con, row(self.con, "a")["id"], "rejected", not_before=9e9)
+        self.assertEqual(add(self.con, "a", size=12), "requeued")
+        self.assertIsNone(row(self.con, "a")["not_before"])
+
+    def test_retry_errors_clears_not_before_and_fails(self):
+        add(self.con, "a")
+        db.set_status(self.con, row(self.con, "a")["id"], "error", not_before=9e9,
+                      finalize_fails=5, error="x")
+        self.assertEqual(db.retry_errors(self.con), 1)
+        r = row(self.con, "a")
+        self.assertEqual((r["status"], r["not_before"], r["finalize_fails"]), ("queued", None, 0))
+
+
+class SchemaMigrationTests(unittest.TestCase):
+    OLD = """CREATE TABLE items(
+  id INTEGER PRIMARY KEY, location TEXT NOT NULL, relpath TEXT NOT NULL,
+  size INTEGER NOT NULL, mtime REAL NOT NULL, kind TEXT NOT NULL, source TEXT NOT NULL,
+  priority INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'queued', reason TEXT, settings TEXT,
+  dest_location TEXT, dest_dir TEXT, final_relpath TEXT, final_size INTEGER,
+  was_online_only INTEGER NOT NULL DEFAULT 0, not_before REAL, attempts INTEGER NOT NULL DEFAULT 0,
+  error TEXT, started_at REAL, finished_at REAL, UNIQUE(location, relpath));"""
+
+    def test_old_database_gets_new_columns(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "old.db"
+            old = sqlite3.connect(path)
+            old.execute(self.OLD)
+            old.execute("INSERT INTO items(location, relpath, size, mtime, kind, source, priority)"
+                        " VALUES('d','a.mp4',1,1.0,'video','library',3)")
+            old.commit()
+            old.close()
+            con = db.open_db(path)
+            try:
+                r = con.execute("SELECT * FROM items").fetchone()
+                self.assertEqual((r["evict_pending"], r["finalize_fails"]), (0, 0))
+                db.set_status(con, r["id"], "done", evict_pending=1, finalize_fails=2)
+            finally:
+                con.close()
+            con = db.open_db(path)  # opening again must not fail
+            con.close()
+
+
 class PlannedNamesTests(DbTestCase):
+    def test_planned_names_casefolded(self):
+        add(self.con, "a")
+        db.set_status(self.con, row(self.con, "a")["id"], "queued",
+                      final_relpath="out/IMG_Compressed.WEBP", final_size=1)
+        self.assertEqual(db.planned_names(self.con, "d", "out"), {"img_compressed.webp"})
+
+
     def test_planned_names(self):
         for rel, status in (("a", "queued"), ("b", "running"), ("c", "published"),
                             ("d", "done"), ("e", "error")):
@@ -234,12 +311,18 @@ class AdoptAndPruneTests(DbTestCase):
     def test_prune_missing(self):
         add(self.con, "keep.mp4")
         add(self.con, "gone.mp4")
+        add(self.con, "done.mp4")
         add(self.con, "pub.mp4")
-        db.set_status(self.con, row(self.con, "gone.mp4")["id"], "done")
+        db.set_status(self.con, row(self.con, "gone.mp4")["id"], "skipped")
+        db.set_status(self.con, row(self.con, "done.mp4")["id"], "done")
         db.set_status(self.con, row(self.con, "pub.mp4")["id"], "published", not_before=0)
+        add(self.con, "rej.mp4")
+        db.set_status(self.con, row(self.con, "rej.mp4")["id"], "rejected")
         n = db.prune_missing(self.con, location="d", under="", seen={"keep.mp4"})
-        self.assertEqual(n, 1)
+        self.assertEqual(n, 2)  # skipped and rejected rows are pruned, done rows never
         self.assertIsNone(row(self.con, "gone.mp4"))
+        self.assertIsNone(row(self.con, "rej.mp4"))
+        self.assertIsNotNone(row(self.con, "done.mp4"))
         self.assertIsNotNone(row(self.con, "keep.mp4"))
         self.assertIsNotNone(row(self.con, "pub.mp4"))
 

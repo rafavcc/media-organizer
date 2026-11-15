@@ -5,6 +5,7 @@ import errno
 import functools
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -101,6 +102,14 @@ class LocalLocation(Location):
     def exists(self, relpath: str) -> bool:
         return self.stat(relpath) is not None
 
+    def list_names(self, folder: str) -> set[str]:
+        """Names of the entries directly inside `folder` (empty when it does not exist)."""
+        try:
+            with os.scandir(self.path(folder) if folder else self.root) as it:
+                return {e.name for e in it}
+        except (FileNotFoundError, NotADirectoryError):
+            return set()
+
     def fetch(self, relpath: str, dest: Path) -> None:
         src = self.path(relpath)
         err = ""
@@ -129,7 +138,8 @@ class LocalLocation(Location):
         final = self.path(relpath)
         if os.path.lexists(final):
             raise FileExistsError(f"{self.name}: {relpath} already exists")
-        part = final.with_name(final.name + PART_SUFFIX)
+        # unique per call, so two publishes aimed at one name never share a part file
+        part = final.with_name(f"{final.name}.{secrets.token_hex(4)}{PART_SUFFIX}")
         try:
             final.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, part)
@@ -200,6 +210,13 @@ class MacSession:
         if not self._is_mounted():
             raise MacUnreachable(f"{self.mount} is not mounted")
 
+    def ssh_alive(self) -> bool:
+        """Quick non-mounting check: does `ssh <host> true` succeed within 10 s?"""
+        try:
+            return self.ssh("true", timeout=10).returncode == 0
+        except Exception:
+            return False
+
     def _mount_alive(self) -> bool:
         try:
             os.stat(self.mount)
@@ -257,6 +274,10 @@ def _mac_guard(fn):
         except OSError as e:
             if self._fatal(e):
                 raise MacUnreachable(repr(e)) from e
+            # EIO and friends with the mount still answering: only an unreachable Mac is a
+            # reason to wait; an ssh that works means the error is real
+            if not isinstance(e, FileExistsError) and not self.session.ssh_alive():
+                raise MacUnreachable(f"ssh check failed after {e!r}") from e
             raise
     return wrapper
 
@@ -293,6 +314,7 @@ class MacLocation(LocalLocation):
         return iter(list(super().walk(sub, recursive)))
 
     stat = _mac_guard(LocalLocation.stat)
+    list_names = _mac_guard(LocalLocation.list_names)
     exists = _mac_guard(LocalLocation.exists)
     delete = _mac_guard(LocalLocation.delete)
     move_within = _mac_guard(LocalLocation.move_within)

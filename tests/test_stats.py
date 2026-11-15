@@ -45,12 +45,14 @@ class StatsTest(unittest.TestCase):
         self.assertEqual(s["first_pass"]["d"], {"done": 0, "total": 0, "eta_days": None})
         self.assertEqual(len(s["daily"]), 30)
         self.assertTrue(all(d["d"] == 0 and d["mega"] == 0 for d in s["daily"]))
-        self.assertEqual(s["queue"], {"downloads": 0, "intake": 0, "mega": 0, "library": 0})
+        self.assertEqual(s["queue"], {"downloads": 0, "intake": 0, "mega": 0, "library": 0,
+                                      "no_space": 0, "evict_pending": 0})
         self.assertEqual([x["name"] for x in s["scans"]], [x.name for x in SCANS])
         self.assertEqual(len(s["milestones"]), 12)
         self.assertFalse(any(m["done"] for m in s["milestones"]))
         self.assertEqual(s["problems"], {"error": 0, "no-gain": 0, "low-quality": 0,
-                                         "changed": 0, "items": []})
+                                         "changed": 0, "multi-frame": 0, "stuck_published": 0,
+                                         "items": []})
         self.assertEqual(s["recent"], [])
 
     def seed(self):
@@ -116,13 +118,83 @@ class StatsTest(unittest.TestCase):
         self.assertTrue(s["paused"])
         self.assertTrue(s["mac_reachable"])
         self.assertEqual(s["now"], cur)
-        self.assertEqual(s["queue"], {"downloads": 1, "intake": 1, "mega": 1, "library": 0})
+        self.assertEqual(s["queue"], {"downloads": 1, "intake": 1, "mega": 1, "library": 0,
+                                      "no_space": 0, "evict_pending": 0})
         self.assertEqual(s["problems"]["no-gain"], 1)
         scan = {x["name"]: x for x in s["scans"]}["d-full"]
         self.assertEqual((scan["finished"], scan["ok"], scan["message"]), (2.0, True, "fine"))
         for bad in ("{}", "not json"):
             db.meta_set(self.con, "current", bad)
             self.assertIsNone(stats.summary(self.con, self.cfg)["now"])
+
+    def test_queue_counts_waiting_for_space_and_pending_evictions(self):
+        now = 1_000_000.0
+        add_item(self.con, "d", "a.mp4", "queued")
+        add_item(self.con, "d", "b.mp4", "queued")
+        add_item(self.con, "d", "c.mp4", "queued")
+        add_item(self.con, "d", "e.mp4", "done")
+        ids = {r["relpath"]: r["id"] for r in self.con.execute("SELECT id, relpath FROM items")}
+        db.set_status(self.con, ids["a.mp4"], "queued", reason="no-space", not_before=now + 10)
+        db.set_status(self.con, ids["b.mp4"], "queued", reason="no-space", not_before=now - 10)
+        db.set_status(self.con, ids["c.mp4"], "queued", reason="name-taken", not_before=now + 10)
+        db.set_status(self.con, ids["e.mp4"], "done", evict_pending=1)
+        q = stats.summary(self.con, self.cfg, now)["queue"]
+        self.assertEqual((q["no_space"], q["evict_pending"]), (1, 1))
+
+    def test_problem_counts_multi_frame_and_stuck_published(self):
+        now = 1_000_000.0
+        add_item(self.con, "d", "m.tif", "rejected", reason="multi-frame")
+        add_item(self.con, "d", "old.mp4", "published")
+        add_item(self.con, "d", "new.mp4", "published")
+        add_item(self.con, "d", "fin.mp4", "published")
+        ids = {r["relpath"]: r["id"] for r in self.con.execute("SELECT id, relpath FROM items")}
+        db.set_status(self.con, ids["old.mp4"], "published", started_at=now - 7200)
+        db.set_status(self.con, ids["new.mp4"], "published", started_at=now - 60)
+        # finished_at wins over started_at when set
+        db.set_status(self.con, ids["fin.mp4"], "published", started_at=now - 9000,
+                      finished_at=now - 30)
+        p = stats.summary(self.con, self.cfg, now)["problems"]
+        self.assertEqual((p["multi-frame"], p["stuck_published"]), (1, 1))
+
+    def test_first_pass_done_survives_a_prune(self):
+        add_item(self.con, "d", "a.mp4", "done")
+        add_item(self.con, "d", "b.mp4", "queued")
+        before = stats.summary(self.con, self.cfg)["first_pass"]["d"]
+        db.prune_missing(self.con, location="d", under="", seen={"b.mp4"})  # a.mp4 was deleted
+        after = stats.summary(self.con, self.cfg)["first_pass"]["d"]
+        self.assertEqual((before["done"], before["total"]), (1, 2))
+        self.assertEqual((after["done"], after["total"]), (1, 2))
+
+    def test_first_pass_unchanged_after_a_full_scan_that_prunes(self):
+        from media_organizer.locations import LocalLocation
+        from media_organizer.scanner import scan_library
+        root = Path(self.cfg.d_root)
+        root.mkdir(parents=True)
+        (root / "left.mp4").write_bytes(b"x" * 10)  # a file that still exists
+        old = time.time() - 7200
+        import os
+        os.utime(root / "left.mp4", (old, old))
+        add_item(self.con, "d", "converted.mp4", "done")  # its original was deleted
+        add_item(self.con, "d", "vanished.mp4", "skipped")  # a skipped file that is gone
+        before = stats.summary(self.con, self.cfg)["first_pass"]["d"]["done"]
+        scan_library(self.con, LocalLocation("d", root), self.cfg, full=True)
+        after = stats.summary(self.con, self.cfg)["first_pass"]["d"]
+        self.assertEqual(before, 2)
+        self.assertEqual(after["done"], 1)  # only the skipped ghost went
+        self.assertEqual(self.con.execute("SELECT status FROM items WHERE "
+                                          "relpath='converted.mp4'").fetchone()[0], "done")
+
+    def test_disk_free_is_live_when_the_root_exists(self):
+        from collections import namedtuple
+        from unittest import mock
+        db.add_snapshot(self.con, ts=1.0, location="d", total_bytes=100, free_bytes=10)
+        self.assertEqual(stats.summary(self.con, self.cfg)["disk"]["d_free"], 10)  # fallback
+        Path(self.cfg.d_root).mkdir(parents=True)
+        usage = namedtuple("usage", "total used free")
+        with mock.patch("media_organizer.stats.shutil.disk_usage",
+                        return_value=usage(1000, 400, 600)):
+            disk = stats.summary(self.con, self.cfg)["disk"]
+        self.assertEqual((disk["d_free"], disk["d_total"]), (600, 1000))
 
     def test_milestones_done_and_disk(self):
         add_item(self.con, "d", "a.mp4", "done")
