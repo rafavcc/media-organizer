@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -219,11 +220,25 @@ class WorkTests(Base):
             self.assertEqual(self.svc.work_once("image"), "queued")
         self.assertFalse(self.svc.mac_up(now=self.svc._mac_at + 1))
 
+    def test_work_once_passes_cached_mac_state_to_the_worker(self):
+        make_image(self.d.root / "p.png")
+        self.queue(self.d, "p.png", kind="image", source="library", priority=3)
+        seen = {}
+
+        def fake(con, item, locs, cfg, work, on_progress=None, is_up=None):
+            seen["mega"], seen["d"] = is_up("mega"), is_up("d")
+            return "done"
+        self.mega.reachable = lambda: (_ for _ in ()).throw(AssertionError("probed"))
+        self.svc._mac_ok, self.svc._mac_at = True, time.time()
+        with mock.patch.object(worker, "process_item", side_effect=fake):
+            self.svc.work_once("image")
+        self.assertEqual(seen, {"mega": True, "d": True})
+
     def test_stop_requeues_running_video(self):
         make_video(self.d.root / "lib.mp4")
         self.queue(self.d, "lib.mp4", source="library", priority=3)
 
-        def fake(con, item, locs, cfg, work, on_progress=None):
+        def fake(con, item, locs, cfg, work, on_progress=None, is_up=None):
             self.svc.stop.set()
             on_progress(0.5)
         with mock.patch.object(worker, "process_item", side_effect=fake):
@@ -238,7 +253,7 @@ class WorkTests(Base):
         self.queue(self.d, "lib.mp4", source="library", priority=3)
         seen = []
 
-        def fake(con, item, locs, cfg, work, on_progress=None):
+        def fake(con, item, locs, cfg, work, on_progress=None, is_up=None):
             on_progress(0.25)
             seen.append(dict(self.svc.current))
             return "done"
@@ -281,7 +296,7 @@ class FixRound1Tests(Base):
         make_video(self.d.root / "lib.mp4")
         self.queue(self.d, "lib.mp4", source="library", priority=3)
 
-        def fake(con, item, locs, cfg, work, on_progress=None):
+        def fake(con, item, locs, cfg, work, on_progress=None, is_up=None):
             db.set_status(con, item["id"], "error")
             raise RuntimeError("late")
         with mock.patch.object(worker, "process_item", side_effect=fake):

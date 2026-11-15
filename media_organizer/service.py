@@ -168,6 +168,11 @@ class Service:
         with self._mac_lock:
             self._mac_ok, self._mac_at = False, time.time()
 
+    def _worker_is_up(self, name: str) -> bool:
+        """Cached answer for worker threads: Mac locations use the shared cache, local ones are up."""
+        loc = self.locs.get(name)
+        return True if loc is None or not loc.is_mac else self.mac_up()
+
     # -- scheduling --
     def tick(self) -> None:
         up = lambda loc: not loc.is_mac or self.mac_up()
@@ -212,7 +217,8 @@ class Service:
                                 "progress": 0.0, "location": item["location"]}
                 self._report(con, force=True)
             return worker.process_item(con, item, self.locs, self.cfg, self.cfg.work_dir,
-                                       on_progress if is_video else None)
+                                       on_progress if is_video else None,
+                                       is_up=self._worker_is_up)
         except MacUnreachable:
             self._mac_down()
             return "queued"

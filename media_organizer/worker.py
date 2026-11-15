@@ -30,6 +30,9 @@ OUTPUT_RATIO = 0.75  # an accepted output is at most this share of the original
 FINALIZE_MAX_FAILS = 5
 EVICT_GIVE_UP_S = 7 * 86400
 _POST_STEP_STATUSES = ("done", "skipped", "rejected")
+NAME_TAKEN_BACKOFF_S = 60
+EVICT_BUDGET_S = 60.0
+_NO_PLAN = {"final_relpath": None, "final_size": None, "final_mtime": None}
 _REJECT_STATUSES = {"efficient": "skipped", "no-gain": "rejected", "low-quality": "rejected",
                     "multi-frame": "rejected", "error": "error"}
 
@@ -43,11 +46,16 @@ def _join(folder: str, name: str) -> str:
     return f"{folder}/{name}" if folder else name
 
 
+def _planned_mtime(item) -> float:
+    """The mtime the final file should have: the recorded stamp (rows from before the column
+    existed were stamped with the original's mtime)."""
+    return item["mtime"] if item["final_mtime"] is None else item["final_mtime"]
+
+
 def _landed_is_ours(landed, item) -> bool:
-    """A file at the recorded path is ours only if its size and mtime match what we planned
-    (`publish` stamps the final file with the source's mtime)."""
+    """A file at the recorded path is ours only if its size and mtime match what we planned."""
     return (landed is not None and landed.size == item["final_size"]
-            and abs(landed.mtime - item["mtime"]) <= MTIME_TOLERANCE_S)
+            and abs(landed.mtime - _planned_mtime(item)) <= MTIME_TOLERANCE_S)
 
 
 def _taken_in(con, loc: Location, folder: str, item_id: int) -> Callable[[str], bool]:
@@ -69,24 +77,25 @@ def _require_space(loc: Location, cfg: Config, work: Path, size: int) -> None:
 
 
 def process_item(con, item: sqlite3.Row, locs: dict[str, Location], cfg: Config, work: Path,
-                 on_progress: Callable[[float], None] | None = None) -> str:
+                 on_progress: Callable[[float], None] | None = None,
+                 is_up: Callable[[str], bool] | None = None) -> str:
     work.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(dir=work))
     try:
         if item["dest_location"]:
-            return _process_download(con, item, locs, cfg, tmp, on_progress)
-        return _process_library(con, item, locs, cfg, tmp, on_progress)
+            return _process_download(con, item, locs, cfg, tmp, on_progress, is_up)
+        return _process_library(con, item, locs, cfg, tmp, on_progress, is_up)
     except MacUnreachable:
         db.set_status(con, item["id"], "queued")
         raise
     except NoSpace:
-        db.set_status(con, item["id"], "queued", reason="no-space", final_relpath=None,
-                      final_size=None, not_before=time.time() + NO_SPACE_BACKOFF_S)
+        db.set_status(con, item["id"], "queued", reason="no-space", **_NO_PLAN,
+                      not_before=time.time() + NO_SPACE_BACKOFF_S)
         return "queued"
     except FileExistsError:
         # another file took the planned name: plan again with a fresh look at the folder
-        db.set_status(con, item["id"], "queued", reason="name-taken", final_relpath=None,
-                      final_size=None)
+        db.set_status(con, item["id"], "queued", reason="name-taken", **_NO_PLAN,
+                      not_before=time.time() + NAME_TAKEN_BACKOFF_S)
         return "queued"
     except Exception as e:
         log.exception("processing %s failed", item["relpath"])
@@ -104,7 +113,7 @@ def _check_source(con, item, loc: Location) -> str | None:
         return "gone"
     if entry.size != item["size"] or entry.mtime != item["mtime"]:
         db.set_status(con, item["id"], "queued", size=entry.size, mtime=entry.mtime,
-                      final_relpath=None, final_size=None)  # a landed copy is of the old content
+                      **_NO_PLAN)  # a landed copy is of the old content
         return "queued"
     return None
 
@@ -116,7 +125,7 @@ def _fetch(loc: Location, item, tmp: Path) -> tuple[Path, str]:
     return local, name
 
 
-def _process_library(con, item, locs, cfg, tmp, on_progress) -> str:
+def _process_library(con, item, locs, cfg, tmp, on_progress, is_up=None) -> str:
     loc = locs[item["location"]]
     early = _check_source(con, item, loc)
     if early:
@@ -126,9 +135,10 @@ def _process_library(con, item, locs, cfg, tmp, on_progress) -> str:
         landed = loc.stat(item["final_relpath"])
         if _landed_is_ours(landed, item):
             # an earlier attempt published this file but was cut off before recording it
-            db.set_status(con, item["id"], "published", not_before=loc.now() + delay)
-            return _after_published(con, item, locs, loc, cfg)
-        db.set_status(con, item["id"], "running", final_relpath=None, final_size=None)
+            db.set_status(con, item["id"], "published", final_mtime=landed.mtime,
+                          not_before=loc.now() + delay)
+            return _after_published(con, item, loc, cfg, is_up)
+        db.set_status(con, item["id"], "running", **_NO_PLAN)
     _require_space(loc, cfg, tmp.parent, item["size"])
     # once online-only, always: a retry finds the file already downloaded by the first fetch
     online_only = bool(item["was_online_only"]) or loc.is_online_only(item["relpath"])
@@ -148,22 +158,29 @@ def _process_library(con, item, locs, cfg, tmp, on_progress) -> str:
 
     folder = _split(item["relpath"])[0]
     expected = outcome.out.stat().st_size
+    stamp = float(int(time.time()))  # converted files carry the conversion time
     with _name_lock:
         final = rules.final_name(name, rules.out_ext(name),
                                  _taken_in(con, loc, folder, item["id"]))
         final_rel = _join(folder, final)
         # record the plan first: if the publish lands but is not recorded, the retry finds it
-        db.set_status(con, item["id"], "running", final_relpath=final_rel, final_size=expected)
-    size = loc.publish(outcome.out, final_rel, mtime=item["mtime"],
+        db.set_status(con, item["id"], "running", final_relpath=final_rel, final_size=expected,
+                      final_mtime=stamp)
+    size = loc.publish(outcome.out, final_rel, mtime=stamp,
                        min_free=int(cfg.min_free_gb * 1024 ** 3))
+    landed = loc.stat(final_rel)  # a filesystem may round or ignore the stamp: keep what it did
     db.set_status(con, item["id"], "published", final_relpath=final_rel, final_size=size,
+                  final_mtime=stamp if landed is None else landed.mtime,
                   not_before=loc.now() + delay)
-    return _after_published(con, item, locs, loc, cfg)
+    return _after_published(con, item, loc, cfg, is_up)
 
 
-def _after_published(con, item, locs, loc: Location, cfg: Config) -> str:
+def _after_published(con, item, loc: Location, cfg: Config,
+                     is_up: Callable[[str], bool] | None = None) -> str:
     if not loc.is_mac:
-        _finalize(con, locs)
+        # only this item's own location: a worker thread must not touch another (Mac) location,
+        # and failures here are not counted (the tick counts at most one per pass)
+        _finalize(con, {loc.name: loc}, is_up, count_failures=False)
     status = con.execute("SELECT status FROM items WHERE id=?", (item["id"],)).fetchone()["status"]
     return _intake_post_step(con, item, loc, cfg, status)
 
@@ -219,13 +236,13 @@ def _retry_post_steps(con, locs: dict[str, Location], cfg: Config) -> None:
             _intake_post_step(con, row, loc, cfg, row["status"])
 
 
-def _process_download(con, item, locs, cfg, tmp, on_progress) -> str:
+def _process_download(con, item, locs, cfg, tmp, on_progress, is_up=None) -> str:
     src_loc = locs[item["location"]]
     dest = locs[item["dest_location"]]
     early = _check_source(con, item, src_loc)
     if early:
         return early
-    if not dest.reachable():
+    if not _loc_up(dest, is_up):
         db.set_status(con, item["id"], "queued")
         raise MacUnreachable(f"{dest.name} is not reachable")
     if item["final_relpath"] and item["final_size"] is not None:
@@ -235,7 +252,7 @@ def _process_download(con, item, locs, cfg, tmp, on_progress) -> str:
             # converted output is at most 75% of the source; an unconverted payload is equal
             return _finish_download(con, item, src_loc, dest, item["final_relpath"],
                                     landed.size, converted=item["final_size"] < item["size"])
-        db.set_status(con, item["id"], "running", final_relpath=None, final_size=None)
+        db.set_status(con, item["id"], "running", **_NO_PLAN)
     _require_space(dest, cfg, tmp.parent, item["size"])
     local, name = _fetch(src_loc, item, tmp)
     converted = False
@@ -249,6 +266,7 @@ def _process_download(con, item, locs, cfg, tmp, on_progress) -> str:
         if outcome.status == "ok":
             converted, payload = True, outcome.out
     expected = payload.stat().st_size
+    stamp = float(int(time.time())) if converted else item["mtime"]
     with _name_lock:
         taken = _taken_in(con, dest, item["dest_dir"], item["id"])
         if converted:
@@ -256,12 +274,14 @@ def _process_download(con, item, locs, cfg, tmp, on_progress) -> str:
         else:
             out_name = rules.free_name(name, taken)
         dest_rel = _join(item["dest_dir"], out_name)
-        db.set_status(con, item["id"], "running", final_relpath=dest_rel, final_size=expected)
-    size = dest.publish(payload, dest_rel, mtime=item["mtime"],
+        db.set_status(con, item["id"], "running", final_relpath=dest_rel, final_size=expected,
+                      final_mtime=stamp)
+    size = dest.publish(payload, dest_rel, mtime=stamp,
                         min_free=int(cfg.min_free_gb * 1024 ** 3))
     landed = dest.stat(dest_rel)
     if size != expected or landed is None or landed.size != expected:
         raise OSError(f"published {dest_rel} does not have the expected size {expected}")
+    db.set_status(con, item["id"], "running", final_mtime=landed.mtime)
     return _finish_download(con, item, src_loc, dest, dest_rel, size, converted)
 
 
@@ -294,12 +314,13 @@ def finalize_published(con, locs: dict[str, Location], cfg: Config,
     pending evictions and any intake post-step that failed earlier. Returns the number of
     originals deleted."""
     retry_evictions(con, locs, cfg, is_up=is_up)
-    deleted = _finalize(con, locs, is_up)
+    deleted = _finalize(con, locs, is_up, count_failures=True)
     _retry_post_steps(con, locs, cfg)
     return deleted
 
 
-def _finalize(con, locs: dict[str, Location], is_up: Callable[[str], bool] | None = None) -> int:
+def _finalize(con, locs: dict[str, Location], is_up: Callable[[str], bool] | None = None,
+              count_failures: bool = True) -> int:
     deleted = 0
     for loc in locs.values():
         due = [r for r in db.due_published(con, loc.now()) if r["location"] == loc.name]
@@ -314,7 +335,8 @@ def _finalize(con, locs: dict[str, Location], is_up: Callable[[str], bool] | Non
                 break
             except OSError as e:
                 log.exception("could not finalize %s", stale["relpath"])
-                _record_finalize_failure(con, stale["id"], e)
+                if count_failures:
+                    _record_finalize_failure(con, stale["id"], e)
     return deleted
 
 
@@ -327,24 +349,29 @@ def _record_finalize_failure(con, item_id: int, exc: Exception) -> None:
             db.set_status(con, item_id, "error", error=f"could not delete original: {exc}")
 
 
-def _try_evict(loc: Location, relpath: str) -> bool:
+def _try_evict(loc: Location, relpath: str, raise_unreachable: bool = False) -> bool:
     """True only when the evict succeeded and the file is now online-only."""
     try:
         return bool(loc.evict(relpath)) and bool(loc.is_online_only(relpath))
     except MacUnreachable:
+        if raise_unreachable:
+            raise
         return False
 
 
 def retry_evictions(con, locs: dict[str, Location], cfg: Config, limit: int = 20,
                     now: float | None = None,
-                    is_up: Callable[[str], bool] | None = None) -> int:
+                    is_up: Callable[[str], bool] | None = None,
+                    budget_s: float = EVICT_BUDGET_S) -> int:
     """Release converted online-only files from the Mac disk again; returns how many were
-    released. Rows older than seven days give up (the flag is cleared, nothing else changes)."""
+    released. Rows older than seven days give up (the flag is cleared, nothing else changes).
+    Stops for this tick at the first unreachable Mac and after `budget_s` seconds."""
     rows = con.execute("SELECT * FROM items WHERE evict_pending=1 AND status='done' "
                        "ORDER BY finished_at ASC, id ASC").fetchall()
     released = tried = 0
+    started = time.monotonic()
     for row in rows:
-        if tried >= limit:
+        if tried >= limit or time.monotonic() - started > budget_s:
             break
         loc = locs.get(row["location"])
         if loc is None or not _loc_up(loc, is_up):
@@ -357,9 +384,13 @@ def retry_evictions(con, locs: dict[str, Location], cfg: Config, limit: int = 20
             log.warning("giving up releasing %s from the Mac disk after 7 days",
                         row["final_relpath"])
             db.set_status(con, row["id"], "done", evict_pending=0)
-        elif _try_evict(loc, row["final_relpath"]):
-            db.set_status(con, row["id"], "done", evict_pending=0)
-            released += 1
+        else:
+            try:
+                if _try_evict(loc, row["final_relpath"], raise_unreachable=True):
+                    db.set_status(con, row["id"], "done", evict_pending=0)
+                    released += 1
+            except MacUnreachable:
+                break
     return released
 
 
@@ -370,11 +401,11 @@ def _finalize_one(con, loc: Location, item_id: int) -> int:
             return 0
         final = loc.stat(item["final_relpath"])
         if (final is None or final.size != item["final_size"]
-                or abs(final.mtime - item["mtime"]) > MTIME_TOLERANCE_S):  # publish stamps it
+                or abs(final.mtime - _planned_mtime(item)) > MTIME_TOLERANCE_S):
             log.warning("LOST %s disappeared or changed after conversion; keeping %s",
                         item["final_relpath"], item["relpath"])
-            db.set_status(con, item_id, "queued", final_relpath=None, final_size=None,
-                          not_before=None)
+            db.set_status(con, item_id, "queued", **_NO_PLAN, not_before=None,
+                          evict_pending=0, finalize_fails=0)
             return 0
         orig = loc.stat(item["relpath"])
         if orig is None:
@@ -386,7 +417,7 @@ def _finalize_one(con, loc: Location, item_id: int) -> int:
             db.set_status(con, item_id, "rejected", reason="changed", finished_at=loc.now())
             return 0
         loc.delete(item["relpath"])
-        db.set_status(con, item_id, "done", finished_at=loc.now(),
+        db.set_status(con, item_id, "done", finished_at=loc.now(), finalize_fails=0,
                       evict_pending=int(bool(item["was_online_only"])))
         db.log_conversion(con, ts=loc.now(), location=item["location"],
                           relpath=item["relpath"], kind=item["kind"],

@@ -146,13 +146,14 @@ class StatsTest(unittest.TestCase):
         add_item(self.con, "d", "m.tif", "rejected", reason="multi-frame")
         add_item(self.con, "d", "old.mp4", "published")
         add_item(self.con, "d", "new.mp4", "published")
-        add_item(self.con, "d", "fin.mp4", "published")
+        add_item(self.con, "d", "requeued.mp4", "published")
         ids = {r["relpath"]: r["id"] for r in self.con.execute("SELECT id, relpath FROM items")}
-        db.set_status(self.con, ids["old.mp4"], "published", started_at=now - 7200)
-        db.set_status(self.con, ids["new.mp4"], "published", started_at=now - 60)
-        # finished_at wins over started_at when set
-        db.set_status(self.con, ids["fin.mp4"], "published", started_at=now - 9000,
-                      finished_at=now - 30)
+        # stuck: due more than an hour ago
+        db.set_status(self.con, ids["old.mp4"], "published", not_before=now - 7200)
+        db.set_status(self.con, ids["new.mp4"], "published", not_before=now - 60)
+        # an old item requeued and republished: stale started/finished times do not matter
+        db.set_status(self.con, ids["requeued.mp4"], "published", not_before=now + 60,
+                      started_at=now - 90000, finished_at=now - 80000)
         p = stats.summary(self.con, self.cfg, now)["problems"]
         self.assertEqual((p["multi-frame"], p["stuck_published"]), (1, 1))
 

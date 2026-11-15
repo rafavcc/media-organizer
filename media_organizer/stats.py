@@ -148,7 +148,7 @@ def _problems(con, now: float) -> dict:
                                   "AND reason=?", (reason,)).fetchone()["n"]
     out["stuck_published"] = con.execute(
         "SELECT COUNT(*) AS n FROM items WHERE status='published' "
-        "AND COALESCE(finished_at, started_at) < ?", (now - STUCK_PUBLISHED_S,)).fetchone()["n"]
+        "AND not_before < ?", (now - STUCK_PUBLISHED_S,)).fetchone()["n"]
     rows = con.execute("SELECT location, relpath, reason, error FROM items WHERE status='error' "
                        "ORDER BY finished_at DESC, id DESC LIMIT ?", (PROBLEM_ITEM_LIMIT,))
     out["items"] = [dict(r) for r in rows]

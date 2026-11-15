@@ -111,7 +111,7 @@ class LibraryTests(Base):
         self.assertFalse(p.exists())
         (c,) = self.conversions()
         self.assertLess(c["bytes_after"], c["bytes_before"])
-        self.assertEqual(out.stat().st_mtime, 1_500_000_000)
+        self.assertLess(abs(out.stat().st_mtime - time.time()), 30)  # carries the conversion time
         self.assertEqual(self.row(item)["status"], "done")
         self.assertEqual(list(self.work.iterdir()), [])
 
@@ -609,8 +609,8 @@ class FinalizeFailureTests(Base):
 
     def test_counter_then_error_then_retry_finishes(self):
         p, item = self.library_published()
-        self.assertEqual(self.row(item)["finalize_fails"], 1)
-        for expected in (2, 3, 4):
+        self.assertEqual(self.row(item)["finalize_fails"], 0)  # the immediate finalize is free
+        for expected in (1, 2, 3, 4):
             self.tick_failing()
             r = self.row(item)
             self.assertEqual((r["status"], r["finalize_fails"]), ("published", expected))
@@ -791,8 +791,8 @@ class RecoveryTests(Base):
         self.assertEqual(self.run_item(item_a), "done")
         self.assertEqual(sorted(f.name for f in (self.mega.root / "TBC").iterdir()),
                          ["pic_compressed.webp", "pic_jpg_compressed.webp"])
-        self.assertEqual((self.mega.root / "TBC" / "pic_compressed.webp").stat().st_mtime,
-                         1_500_000_000)
+        self.assertLess(abs((self.mega.root / "TBC" / "pic_compressed.webp").stat().st_mtime
+                            - time.time()), 30)
         self.assertFalse(a.exists())
         self.assertFalse(b.exists())
         self.assertEqual(len(self.conversions()), 2)
@@ -808,7 +808,7 @@ class RecoveryTests(Base):
         other.write_bytes(b"o" * 50)
         os.utime(other, (1_400_000_000, 1_400_000_000))
         db.set_status(self.con, item["id"], "running", final_relpath="TBC/pic_compressed.webp",
-                      final_size=50)
+                      final_size=50, final_mtime=1_500_000_000.0)
         self.assertEqual(self.run_item(self.row(item)), "done")
         self.assertEqual(other.read_bytes(), b"o" * 50)
         self.assertEqual(sorted(f.name for f in (self.mega.root / "TBC").iterdir()),
@@ -822,7 +822,7 @@ class RecoveryTests(Base):
         os.utime(other, (1_400_000_000, 1_400_000_000))
         item = self.add(self.mega, "x.mp4")
         db.set_status(self.con, item["id"], "running", final_relpath="x_compressed.mp4",
-                      final_size=99)
+                      final_size=99, final_mtime=1_500_000_000.0)
         self.run_item(self.row(item))  # the final publish may still refuse (test ratio is 0.9)
         self.assertEqual(self.mega.fetched, ["x.mp4"])  # but the pre-check let it through
         self.assertEqual(self.row(item)["final_relpath"], "x_mp4_compressed.mp4")
@@ -997,3 +997,232 @@ class RecoveryTests(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _no_reachable(loc):
+    loc.reachable = mock.Mock(side_effect=AssertionError("worker called reachable()"))
+
+
+class WorkerNeverProbesMacTests(Base):
+    def test_library_finalize_skips_mac_rows_and_never_probes(self):
+        _no_reachable(self.mega)
+        make_video(self.mega.root / "m.mp4")
+        m = self.add(self.mega, "m.mp4")
+        db.set_status(self.con, m["id"], "published", final_relpath="m_compressed.mp4",
+                      final_size=1, not_before=0.0)  # a Mac row that is due
+        make_video(self.d.root / "x.mp4")
+        item = self.add(self.d, "x.mp4")
+        self.assertEqual(worker.process_item(self.con, item, self.locs, self.cfg, self.work,
+                                             is_up=lambda name: True), "done")
+        self.assertEqual(self.row(m)["status"], "published")  # not touched from this thread
+
+    def test_downloads_to_mac_uses_is_up(self):
+        _no_reachable(self.mega)
+        make_image(self.dl.root / "pic.png")
+        item = self.add(self.dl, "pic.png", kind="image", source="downloads",
+                        dest_location="mega", dest_dir="TBC")
+        self.assertEqual(worker.process_item(self.con, item, self.locs, self.cfg, self.work,
+                                             is_up=lambda name: True), "done")
+        self.assertTrue((self.mega.root / "TBC" / "pic_compressed.webp").exists())
+
+    def test_downloads_is_up_false_is_unreachable(self):
+        _no_reachable(self.mega)
+        make_image(self.dl.root / "pic.png")
+        item = self.add(self.dl, "pic.png", kind="image", source="downloads",
+                        dest_location="mega", dest_dir="TBC")
+        with self.assertRaises(MacUnreachable):
+            worker.process_item(self.con, item, self.locs, self.cfg, self.work,
+                                is_up=lambda name: False)
+        self.assertEqual(self.row(item)["status"], "queued")
+        self.assertTrue((self.dl.root / "pic.png").exists())
+
+
+class ConversionStampTests(Base):
+    def test_converted_file_carries_conversion_time_and_original_is_deleted(self):
+        p = make_video(self.d.root / "x.mp4")
+        os.utime(p, (1_500_000_000, 1_500_000_000))
+        item = self.add(self.d, "x.mp4")
+        before = time.time()
+        self.assertEqual(self.run_item(item), "done")
+        out = self.d.root / "x_compressed.mp4"
+        self.assertGreaterEqual(out.stat().st_mtime, int(before) - 1)
+        self.assertFalse(p.exists())
+        self.assertEqual(self.row(item)["final_mtime"], out.stat().st_mtime)
+
+    def test_filesystem_that_changes_the_stamp_still_finalizes(self):
+        p = make_video(self.mega.root / "x.mp4")
+        item = self.add(self.mega, "x.mp4")
+        real = os.utime
+
+        def skewed(path, times=None, **kw):
+            real(path, (times[0] + 500, times[1] + 500), **kw)
+        with mock.patch("os.utime", skewed):
+            self.assertEqual(self.run_item(item), "published")
+        final = self.mega.root / "x_compressed.mp4"
+        r = self.row(item)
+        self.assertEqual(r["final_mtime"], final.stat().st_mtime)  # the observed one
+        self.mega.clock = r["not_before"] + 1
+        self.assertEqual(worker.finalize_published(self.con, self.locs, self.cfg), 1)
+        self.assertFalse(p.exists())
+
+    def test_unconverted_payload_keeps_original_mtime(self):
+        f = self.dl.root / "pic.webp"
+        f.write_bytes(b"webpdata")
+        os.utime(f, (1_500_000_000, 1_500_000_000))
+        item = self.add(self.dl, "pic.webp", kind="image", source="downloads",
+                        dest_location="mega", dest_dir="TBC")
+        db_row = {}
+        orig = self.mega.publish
+
+        def spy(src, relpath, mtime, min_free):
+            db_row.update(self.row(item))
+            return orig(src, relpath, mtime, min_free)
+        self.mega.publish = spy
+        self.assertEqual(self.run_item(item), "done")
+        self.assertEqual(db_row["final_mtime"], 1_500_000_000)
+        self.assertEqual((self.mega.root / "TBC" / "pic.webp").stat().st_mtime, 1_500_000_000)
+
+    def test_shortcut_matches_on_planned_stamp(self):
+        p = make_video(self.mega.root / "x.mp4")
+        item = self.add(self.mega, "x.mp4")
+        self.mega.error_after_publish = MacUnreachable("dropped after rename")
+        with self.assertRaises(MacUnreachable):
+            self.run_item(item)
+        r = self.row(item)
+        final = self.mega.root / "x_compressed.mp4"
+        self.assertEqual(r["final_mtime"], float(int(r["final_mtime"])))
+        self.assertLessEqual(abs(final.stat().st_mtime - r["final_mtime"]), 2)
+        self.mega.error_after_publish = None
+        mock.patch("media_organizer.worker.convert",
+                   side_effect=AssertionError("must not re-encode")).start()
+        self.addCleanup(mock.patch.stopall)
+        item = db.claim_next(self.con, kind="video", exclude_locations=())
+        self.assertEqual(self.run_item(item), "published")
+
+    def test_foreign_same_size_file_with_other_mtime_is_rejected(self):
+        p = make_video(self.mega.root / "x.mp4")
+        other = self.mega.root / "x_compressed.mp4"
+        other.write_bytes(b"o" * 99)
+        os.utime(other, (1_400_000_000, 1_400_000_000))
+        item = self.add(self.mega, "x.mp4")
+        db.set_status(self.con, item["id"], "running", final_relpath="x_compressed.mp4",
+                      final_size=99, final_mtime=time.time())
+        self.run_item(self.row(item))
+        self.assertEqual(self.mega.fetched, ["x.mp4"])  # went on to convert, not the shortcut
+        self.assertEqual(other.read_bytes(), b"o" * 99)
+
+    def test_requeue_and_lost_clear_final_mtime(self):
+        make_video(self.mega.root / "x.mp4")
+        item = self.add(self.mega, "x.mp4")
+        self.assertEqual(self.run_item(item), "published")
+        (self.mega.root / "x_compressed.mp4").unlink()
+        self.mega.clock = self.row(item)["not_before"] + 1
+        with self.assertLogs("media_organizer.worker", logging.WARNING):
+            worker.finalize_published(self.con, self.locs, self.cfg)
+        r = self.row(item)
+        self.assertEqual((r["status"], r["final_mtime"]), ("queued", None))
+        db.set_status(self.con, item["id"], "done", final_relpath="a", final_size=1,
+                      final_mtime=5.0)
+        self.assertEqual(db.upsert_candidate(
+            self.con, location="mega", relpath="x.mp4", size=1, mtime=9.0, kind="video",
+            source="library", priority=2, settings="s"), "requeued")
+        self.assertIsNone(self.row(item)["final_mtime"])
+
+
+class FinalizeFailureCountTests(FinalizeFailureTests):
+    def test_immediate_finalize_failures_in_one_tick_do_not_error_the_row(self):
+        p, item = self.library_published()
+        with mock.patch.object(self.d, "delete", side_effect=PermissionError("ro")), \
+                self.assertLogs("media_organizer.worker", logging.ERROR):
+            for _ in range(5):
+                worker._after_published(self.con, self.row(item), self.d, self.cfg)
+        r = self.row(item)
+        self.assertEqual((r["status"], r["finalize_fails"]), ("published", 0))
+
+    def test_success_and_requeue_reset_the_counter(self):
+        p, item = self.library_published()
+        db.set_status(self.con, item["id"], "published", finalize_fails=3)
+        worker.finalize_published(self.con, self.locs, self.cfg)
+        r = self.row(item)
+        self.assertEqual((r["status"], r["finalize_fails"]), ("done", 0))
+        make_video(self.d.root / "y.mp4")
+        y = self.add(self.d, "y.mp4")
+        db.set_status(self.con, y["id"], "published", final_relpath="gone.mp4", final_size=1,
+                      final_mtime=1.0, finalize_fails=3, not_before=0.0)
+        with self.assertLogs("media_organizer.worker", logging.WARNING):
+            worker.finalize_published(self.con, self.locs, self.cfg)
+        r = self.row(y)
+        self.assertEqual((r["status"], r["finalize_fails"]), ("queued", 0))
+
+
+class EvictPendingClearedTests(Base):
+    def done_pending(self, rel="x.mp4"):
+        make_video(self.d.root / rel)
+        it = self.add(self.d, rel)
+        db.set_status(self.con, it["id"], "done", evict_pending=1, final_relpath="f", final_size=1)
+        return it
+
+    def test_upsert_requeue_clears_flag(self):
+        it = self.done_pending()
+        self.assertEqual(db.upsert_candidate(
+            self.con, location="d", relpath="x.mp4", size=1, mtime=123.0, kind="video",
+            source="library", priority=3, settings="s"), "requeued")
+        self.assertEqual(self.row(it)["evict_pending"], 0)
+
+    def test_retry_errors_clears_flag(self):
+        it = self.done_pending()
+        db.set_status(self.con, it["id"], "error", evict_pending=1)
+        db.retry_errors(self.con)
+        self.assertEqual(self.row(it)["evict_pending"], 0)
+
+    def test_lost_clears_flag(self):
+        make_video(self.d.root / "x.mp4")
+        it = self.add(self.d, "x.mp4")
+        db.set_status(self.con, it["id"], "published", final_relpath="gone.mp4", final_size=1,
+                      final_mtime=1.0, evict_pending=1, not_before=0.0)
+        with self.assertLogs("media_organizer.worker", logging.WARNING):
+            worker.finalize_published(self.con, self.locs, self.cfg)
+        self.assertEqual(self.row(it)["evict_pending"], 0)
+
+
+class EvictBudgetTests(Base):
+    def pending(self, n):
+        ids = []
+        for i in range(n):
+            make_video(self.mega.root / f"v{i}.mp4")
+            it = self.add(self.mega, f"v{i}.mp4")
+            db.set_status(self.con, it["id"], "done", evict_pending=1, finished_at=100.0 + i,
+                          final_relpath=f"v{i}_c.mp4", final_size=1)
+            ids.append(it)
+        return ids
+
+    def test_stops_at_first_mac_unreachable(self):
+        self.pending(3)
+        calls = []
+
+        def evict(rel):
+            calls.append(rel)
+            raise MacUnreachable("gone")
+        self.mega.evict = evict
+        n = worker.retry_evictions(self.con, self.locs, self.cfg, now=200.0)
+        self.assertEqual((n, calls), (0, ["v0_c.mp4"]))
+
+    def test_spends_at_most_sixty_seconds(self):
+        self.pending(5)
+        ticks = iter([0.0, 0.0, 30.0, 61.0, 61.0, 61.0, 61.0, 61.0])
+        with mock.patch.object(worker.time, "monotonic", lambda: next(ticks)):
+            worker.retry_evictions(self.con, self.locs, self.cfg, now=200.0)
+        self.assertEqual(len(self.mega.evicted), 2)
+
+
+class NameTakenBackoffTests(Base):
+    def test_name_taken_requeue_backs_off(self):
+        make_video(self.mega.root / "x.mp4")
+        item = self.add(self.mega, "x.mp4")
+        self.mega.publish_error = FileExistsError("taken")
+        before = time.time()
+        self.assertEqual(self.run_item(item), "queued")
+        nb = self.row(item)["not_before"]
+        self.assertGreaterEqual(nb, before + 59)
+        self.assertLessEqual(nb, time.time() + 61)
+        self.assertIsNone(db.claim_next(self.con, kind="video", exclude_locations=()))

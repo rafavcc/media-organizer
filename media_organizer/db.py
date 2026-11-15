@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS items(
   was_online_only INTEGER NOT NULL DEFAULT 0, not_before REAL, attempts INTEGER NOT NULL DEFAULT 0,
   error TEXT, started_at REAL, finished_at REAL,
   evict_pending INTEGER NOT NULL DEFAULT 0, finalize_fails INTEGER NOT NULL DEFAULT 0,
+  final_mtime REAL,
   UNIQUE(location, relpath));
 CREATE INDEX IF NOT EXISTS items_queue ON items(status, kind, priority, size DESC);
 CREATE TABLE IF NOT EXISTS conversions(id INTEGER PRIMARY KEY, ts REAL NOT NULL,
@@ -34,10 +35,11 @@ ITEM_COLUMNS = {
     "location", "relpath", "size", "mtime", "kind", "source", "priority", "status", "reason",
     "settings", "dest_location", "dest_dir", "final_relpath", "final_size", "was_online_only",
     "not_before", "attempts", "error", "started_at", "finished_at", "evict_pending",
-    "finalize_fails",
+    "finalize_fails", "final_mtime",
 }
 NEW_COLUMNS = {"evict_pending": "INTEGER NOT NULL DEFAULT 0",
-               "finalize_fails": "INTEGER NOT NULL DEFAULT 0"}
+               "finalize_fails": "INTEGER NOT NULL DEFAULT 0",
+               "final_mtime": "REAL"}
 TERMINAL = ("done", "skipped", "rejected", "error")
 
 
@@ -93,13 +95,15 @@ def upsert_candidate(con, *, location, relpath, size, mtime, kind, source, prior
                 return "known"
             # the file changed, so a recorded publish belongs to the old content
             con.execute("UPDATE items SET size=?, mtime=?, final_relpath=NULL, final_size=NULL, "
-                        "not_before=NULL, reason=NULL WHERE id=?", (size, mtime, row["id"]))
+                        "final_mtime=NULL, not_before=NULL, reason=NULL, finalize_fails=0 "
+                        "WHERE id=?", (size, mtime, row["id"]))
             return "requeued"
         if same_file and (status not in ("skipped", "rejected") or row["settings"] == settings):
             return "known"
         con.execute(
             "UPDATE items SET status='queued', reason=NULL, error=NULL, final_relpath=NULL, "
-            "final_size=NULL, not_before=NULL, size=?, mtime=?, settings=?, source=?, "
+            "final_size=NULL, final_mtime=NULL, not_before=NULL, evict_pending=0, "
+            "finalize_fails=0, size=?, mtime=?, settings=?, source=?, "
             "priority=?, dest_location=?, dest_dir=? WHERE id=?",
             (size, mtime, settings, source, priority, dest_location, dest_dir, row["id"]))
         return "requeued"
@@ -192,7 +196,7 @@ def reset_running(con) -> int:
 def retry_errors(con) -> int:
     with _tx(con):
         return con.execute("UPDATE items SET status='queued', error=NULL, not_before=NULL, "
-                           "finalize_fails=0 WHERE status='error'").rowcount
+                           "finalize_fails=0, evict_pending=0 WHERE status='error'").rowcount
 
 
 def delete_item(con, item_id: int) -> None:

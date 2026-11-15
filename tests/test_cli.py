@@ -105,7 +105,7 @@ class StatusLineTests(CliCase):
         db.set_status(con, ids["b.mp4"], "queued", reason="no-space", not_before=now + 3000)
         db.set_status(con, ids["c.mp4"], "done", evict_pending=1, finished_at=now)
         db.set_status(con, ids["d.tif"], "rejected", reason="changed")
-        db.set_status(con, ids["e.mp4"], "published", started_at=now - 7200)
+        db.set_status(con, ids["e.mp4"], "published", not_before=now - 7200)
         out = self.run_cli("status")[1]
         queue = [l for l in out.splitlines() if l.startswith("Queue")][0]
         self.assertIn("· 2 waiting for space", queue)
