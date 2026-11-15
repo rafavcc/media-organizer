@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -195,6 +196,7 @@ class WorkTests(Base):
         self.queue(self.d, "lib.mp4", source="library", priority=3)
         self.queue(self.dl, "dl.mp4", source="downloads", priority=0,
                    dest_location="mega", dest_dir="TBC")
+        self.svc.mac_up()  # the main thread refreshes the cache; workers only read it
         self.assertIsNotNone(self.svc.work_once("video"))
         self.assertEqual(self.row("lib.mp4")["status"], "queued")
         self.assertIsNone(self.row("dl.mp4", "win_dl"))  # processed and finished
@@ -232,6 +234,7 @@ class WorkTests(Base):
     def test_mac_unreachable_during_processing(self):
         make_image(self.mega.root / "m.png")
         self.queue(self.mega, "m.png", kind="image", source="library", priority=2)
+        self.svc.mac_up()
         with mock.patch.object(worker, "process_item", side_effect=MacUnreachable("x")):
             self.assertEqual(self.svc.work_once("image"), "queued")
         self.assertFalse(self.svc.mac_up(now=self.svc._mac_at + 1))
@@ -292,7 +295,7 @@ class FixRound1Tests(Base):
             def __getattr__(self, name):
                 raise AssertionError(f"service connection used: {name}")
         self.svc.con = Forbidden()
-        self.assertIsNone(self.svc._mac_at)  # expired cache
+        self.assertTrue(self.svc.mac_up())  # refreshed by the main thread
         self.assertEqual(self.svc.work_once("image", other), "published")
 
     def test_tick_writes_mac_reachable_from_the_cache(self):
@@ -340,7 +343,7 @@ class FixRound1Tests(Base):
         seen = []
         self.set_mac(False)
         with mock.patch.object(service, "finalize_published",
-                               side_effect=lambda con, locs, cfg, is_up=None: seen.append(is_up)):
+                               side_effect=lambda con, locs, cfg, is_up=None, **kw: seen.append(is_up)):
             self.svc.tick()
         is_up = seen[0]
         self.assertFalse(is_up("mega"))
@@ -351,7 +354,7 @@ class FixRound1Tests(Base):
         calls = []
         scan = lambda *a, **k: calls.append("scan") or mock.Mock(suspect=False, found=0, queued=0)
         with mock.patch.object(service, "finalize_published",
-                               side_effect=lambda *a: calls.append("finalize")), \
+                               side_effect=lambda *a, **kw: calls.append("finalize")), \
                 mock.patch.object(service, "run_sorter",
                                   side_effect=lambda *a: calls.append("sorter")), \
                 mock.patch.object(service, "scan_library", side_effect=scan), \
@@ -364,3 +367,65 @@ class FixRound1Tests(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkerCacheTests(Base):
+    def on_thread(self, fn):
+        out = {}
+
+        def run():
+            try:
+                out["v"] = fn()
+            except BaseException as e:  # noqa: BLE001
+                out["e"] = e
+        t = threading.Thread(target=run)
+        t.start()
+        t.join()
+        if "e" in out:
+            raise out["e"]
+        return out["v"]
+
+    def test_worker_thread_never_probes_and_sees_expired_cache_as_down(self):
+        make_image(self.mega.root / "m.png")
+        self.queue(self.mega, "m.png", kind="image", source="library", priority=2)
+        self.mega.reachable = lambda: (_ for _ in ()).throw(AssertionError("probed"))
+        self.mac_dl.reachable = self.mega.reachable
+        self.assertIsNone(self.svc._mac_at)  # never set: counts as down
+        self.assertIsNone(self.on_thread(lambda: self.svc.work_once("image")))
+        self.assertFalse(self.on_thread(lambda: self.svc._worker_is_up("mega")))
+        self.assertTrue(self.on_thread(lambda: self.svc._worker_is_up("d")))
+        self.assertEqual(self.row("m.png", "mega")["status"], "queued")
+        self.svc._mac_ok, self.svc._mac_at = True, time.time() - 120  # expired
+        self.assertFalse(self.on_thread(lambda: self.svc.mac_cached()))
+
+    def test_tick_refreshes_the_cache_for_workers(self):
+        make_image(self.mega.root / "m.png")
+        self.queue(self.mega, "m.png", kind="image", source="library", priority=2)
+        self.assertFalse(self.svc.mac_cached())
+        self.svc.tick()  # main thread probes
+        self.assertTrue(self.on_thread(lambda: self.svc.mac_cached()))
+        self.assertEqual(self.on_thread(lambda: self.svc.work_once("image")), "published")
+
+
+class TickCountTests(Base):
+    def test_failing_delete_counts_once_per_tick(self):
+        make_video(self.d.root / "x.mp4")
+        self.queue(self.d, "x.mp4", source="library", priority=3)
+        self.all_ran(time.time())  # no scans
+        item = db.claim_next(self.con, kind="video", exclude_locations=())
+        with mock.patch.object(self.d, "delete", side_effect=PermissionError("ro")), \
+                self.assertLogs("media_organizer.worker", "ERROR"):
+            self.assertEqual(worker.process_item(self.con, item, self.locs, self.cfg,
+                                                 self.cfg.work_dir), "published")
+            for n in range(1, 5):
+                self.svc.tick()
+                r = self.row("x.mp4")
+                self.assertEqual((r["status"], r["finalize_fails"]), ("published", n))
+            self.svc.tick()
+        self.assertEqual(self.row("x.mp4")["status"], "error")
+
+    def test_evictions_retried_once_per_tick(self):
+        self.all_ran(time.time())
+        with mock.patch.object(worker, "retry_evictions", return_value=0) as m:
+            self.svc.tick()
+        self.assertEqual(m.call_count, 1)

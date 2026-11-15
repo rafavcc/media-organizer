@@ -309,12 +309,14 @@ def _loc_up(loc: Location, is_up: Callable[[str], bool] | None) -> bool:
 
 
 def finalize_published(con, locs: dict[str, Location], cfg: Config,
-                       is_up: Callable[[str], bool] | None = None) -> int:
+                       is_up: Callable[[str], bool] | None = None,
+                       count_failures: bool = True, evictions: bool = True) -> int:
     """Delete the original of every published row that is due and verified; also retry any
     pending evictions and any intake post-step that failed earlier. Returns the number of
     originals deleted."""
-    retry_evictions(con, locs, cfg, is_up=is_up)
-    deleted = _finalize(con, locs, is_up, count_failures=True)
+    if evictions:
+        retry_evictions(con, locs, cfg, is_up=is_up)
+    deleted = _finalize(con, locs, is_up, count_failures=count_failures)
     _retry_post_steps(con, locs, cfg)
     return deleted
 

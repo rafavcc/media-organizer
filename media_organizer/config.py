@@ -81,4 +81,6 @@ def load_config(path: Path | None = None) -> Config:
         raise ValueError(f"unknown config key(s) in {path}: {', '.join(unknown)}")
     for name in _PATH_FIELDS & set(data):
         data[name] = Path(data[name]).expanduser()
+    if "encode_stall_min" in data and not data["encode_stall_min"] >= 1:
+        raise ValueError(f"encode_stall_min in {path} must be at least 1 (minutes)")
     return Config(**data)

@@ -76,11 +76,11 @@ def run_video(src: Path, out: Path, info: VideoInfo, cfg: Config,
     try:
         for line in proc.stdout:
             key, _, value = line.strip().partition("=")
-            if key not in ("out_time_us", "out_time_ms"):
+            if key != "out_time_us":
                 continue
             if value != last["value"] and value not in ("N/A", ""):
                 last["value"], last["at"] = value, time.monotonic()
-            if on_progress and key == "out_time_us" and info.duration > 0:
+            if on_progress and info.duration > 0:
                 try:
                     done_frac = int(value) / 1e6 / info.duration
                 except ValueError:

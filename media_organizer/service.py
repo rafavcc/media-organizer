@@ -165,7 +165,15 @@ class Service:
 
     # -- Mac reachability: one shared in-memory cache (no database access, worker threads
     #    call this); tick() persists it. Both Mac locations share one session --
+    def mac_cached(self, now: float | None = None) -> bool:
+        """The cached answer, for any thread. Never probes: an expired or unset cache is DOWN."""
+        now = time.time() if now is None else now
+        with self._mac_lock:
+            return (self._mac_at is not None and now - self._mac_at < MAC_CACHE_S
+                    and self._mac_ok)
+
     def mac_up(self, now: float | None = None) -> bool:
+        """Refresh the cache when expired (it can mount/unmount and wait on ssh): main thread only."""
         now = time.time() if now is None else now
         with self._mac_lock:
             if self._mac_at is None or now - self._mac_at >= MAC_CACHE_S:
@@ -180,18 +188,22 @@ class Service:
     def _worker_is_up(self, name: str) -> bool:
         """Cached answer for worker threads: Mac locations use the shared cache, local ones are up."""
         loc = self.locs.get(name)
-        return True if loc is None or not loc.is_mac else self.mac_up()
+        return True if loc is None or not loc.is_mac else self.mac_cached()
 
     # -- scheduling --
     def tick(self) -> None:
         up = lambda loc: not loc.is_mac or self.mac_up()
         cached = lambda name: self.mac_up()  # one cached answer for both Mac locations
+        self.mac_up()  # keep the cache fresh for the worker threads, which never probe
         # Before the scans too, so a long scan does not delay deleting originals or the sorter.
-        finalize_published(self.con, self.locs, self.cfg, cached)
+        # counted and evicted once per tick, on the second pass only
+        finalize_published(self.con, self.locs, self.cfg, cached, count_failures=False,
+                           evictions=False)
         run_sorter(self.con, self.locs, self.cfg)
         for scan in due_scans(self.con, self.cfg, time.time()):
             if self.stop.is_set():
                 return
+            self.mac_up()
             run_scan(self.con, scan, self.locs, self.cfg, up, self._mac_down)
         finalize_published(self.con, self.locs, self.cfg, cached)
         run_sorter(self.con, self.locs, self.cfg)
@@ -208,7 +220,7 @@ class Service:
         con = self.con if con is None else con
         if self.stop.is_set() or db.meta_get(con, "paused") == "1":
             return None
-        excluded = [] if self.mac_up() else [l.name for l in self.locs.values() if l.is_mac]
+        excluded = [] if self.mac_cached() else [l.name for l in self.locs.values() if l.is_mac]
         item = db.claim_next(con, kind=kind, exclude_locations=excluded)
         if item is None:
             return None

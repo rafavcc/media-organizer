@@ -276,6 +276,33 @@ class StallAndTimeoutTests(unittest.TestCase):
         self.assertEqual(seen["ffprobe"], 120)
         self.assertEqual(seen["ffmpeg"], 1800)  # the SSIM run
 
+    def test_apng_walk_survives_truncated_and_oversized_chunks(self):
+        from media_organizer.convert import _png_is_animated
+        sig = b"\x89PNG\r\n\x1a\n"
+        p = self.tmp / "t.png"
+        for data in (sig, sig + b"\0\0", sig + (13).to_bytes(4, "big") + b"IHDR" + b"\0" * 5,
+                     sig + (2 ** 31).to_bytes(4, "big") + b"tEXt" + b"abc", b""):
+            p.write_bytes(data)
+            self.assertFalse(_png_is_animated(p))
+
+    def test_stall_below_one_minute_is_rejected_at_load(self):
+        from media_organizer.config import load_config
+        c = self.tmp / "c.toml"
+        c.write_text("encode_stall_min = 0.5\n")
+        with self.assertRaises(ValueError) as cm:
+            load_config(c)
+        self.assertIn("encode_stall_min", str(cm.exception))
+        c.write_text("encode_stall_min = 1\n")
+        self.assertEqual(load_config(c).encode_stall_min, 1)
+
+    def test_only_out_time_us_counts_as_progress(self):
+        src = make_video(self.tmp / "a.mp4", extra=["-b:v", "4M"])
+        self.fake_ffmpeg("#!/bin/sh\nwhile true; do echo out_time_ms=$(date +%s%N); "
+                         "echo out_time=00:00:01; sleep 0.2; done\n")
+        cfg = test_config(self.tmp, encode_stall_min=0.03)
+        res = convert(src, "a.mp4", src.stat().st_size, self.work, cfg)
+        self.assertIn("encoder stalled", res.message)
+
     def test_apng_actl_after_64k_of_ancillary_chunks_is_detected(self):
         def chunk(kind, data):
             return len(data).to_bytes(4, "big") + kind + data + b"\0\0\0\0"
