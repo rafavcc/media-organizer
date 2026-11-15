@@ -195,7 +195,7 @@ The first full pass over the roughly 860 GB in D: takes **days to weeks**. That 
 
    `loginctl enable-linger` lets the service keep running with no terminal open. The last command should show `active (running)`. If you do not want to start it yet, use `systemctl --user enable media-organizer` without `--now`. (Copy the unit, do not link it: files on `/mnt/c` look executable and world-writable to systemd, which complains.) If you move the repository, edit `WorkingDirectory=` in the unit.
 
-7. **Open the dashboard** on the PC at `http://localhost:8765` (user name: anything; password: the one from step 1). Use the `192.168.0.33` address only from other devices, after "Opening the dashboard from other devices". You should see a page asking for the password. A blank page or a timeout means the service is not running: check `systemctl --user status media-organizer`. After a minute `media-organizer status` should show scans completing.
+7. **Open the dashboard** on the PC at `http://localhost:8002` (user name: anything; password: the one from step 1). Use the `192.168.0.33` address only from other devices, after "Opening the dashboard from other devices". You should see a page asking for the password. A blank page or a timeout means the service is not running: check `systemctl --user status media-organizer`. After a minute `media-organizer status` should show scans completing.
 
 ## Daily use
 
@@ -224,7 +224,7 @@ Problems     3 errors · 222 no-gain · 7 low-quality · 1 changed · 2 multi-fr
 
 Other things you can do:
 
-- **Dashboard:** `http://localhost:8765` on the PC, `http://192.168.0.33:8765` from other devices. Read-only: space freed, D: free space, milestones, progress, charts (space freed over time, conversions per day, the biggest folders on D: and in MEGA), recent conversions and problems. The charts use Chart.js, which the program serves itself (behind the same password), so the page needs no internet connection; if the chart library cannot load, the charts show "Charts unavailable" and the rest of the page works. It still works when the Mac is off (MEGA figures are from the last scan). Pause, resume and retry are only available on the command line.
+- **Dashboard:** `http://localhost:8002` on the PC, `http://192.168.0.33:8002` from other devices. Read-only: space freed, D: free space, milestones, progress, charts (space freed over time, conversions per day, the biggest folders on D: and in MEGA), recent conversions and problems. The charts use Chart.js, which the program serves itself (behind the same password), so the page needs no internet connection; if the chart library cannot load, the charts show "Charts unavailable" and the rest of the page works. It still works when the Mac is off (MEGA figures are from the last scan). Pause, resume and retry are only available on the command line.
 - **Log:** `~/.local/share/media-organizer/organizer.log` (rotated, 5 files of 5 MB). Follow it with `tail -f ~/.local/share/media-organizer/organizer.log`, or `journalctl --user -u media-organizer -f`.
 - **Service:** `systemctl --user stop|start|restart media-organizer`. Stop waits up to 60 seconds for the running encode to be put back cleanly.
 - **When things are scanned:** the intake folders (`D:\_TO_CONVERT`, `MEGA/TBC`) and both Downloads folders (with all their subfolders) every 6 hours; both whole libraries once a week; Mac scans are retried every hour while the Mac is away.
@@ -238,7 +238,7 @@ Files in `D:\7_XYZ\_TO_CONVERT` are, after conversion, moved to `_CONVERTED` and
 
 ## Opening the dashboard from other devices
 
-The dashboard listens on port 8765 inside WSL. By default only the PC itself can reach it. First confirm the PC's home-network address: run `ipconfig` in PowerShell and look at the IPv4 address (this README assumes `192.168.0.33`). Then pick **one** of these:
+The dashboard listens on port 8002 inside WSL. By default only the PC itself can reach it. First confirm the PC's home-network address: run `ipconfig` in PowerShell and look at the IPv4 address (this README assumes `192.168.0.33`). Then pick **one** of these:
 
 **(a) Mirrored networking (simplest).** In Windows, create or edit `%UserProfile%\.wslconfig` (that is `C:\Users\rafavcc\.wslconfig`) and put:
 
@@ -253,13 +253,13 @@ Then in PowerShell run `wsl --shutdown` and open Ubuntu again. WSL now shares th
 
 ```powershell
 $wsl = (wsl hostname -I).Trim().Split(" ")[0]
-netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=8765 connectaddress=$wsl connectport=8765
-New-NetFirewallRule -DisplayName "Media organizer dashboard" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow -Profile Private -RemoteAddress LocalSubnet
+netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=8002 connectaddress=$wsl connectport=8002
+New-NetFirewallRule -DisplayName "Media organizer dashboard" -Direction Inbound -Protocol TCP -LocalPort 8002 -Action Allow -Profile Private -RemoteAddress LocalSubnet
 ```
 
-WSL's own address changes after a restart, so the rule must be redone then: run `netsh interface portproxy delete v4tov4 listenaddress=0.0.0.0 listenport=8765` and the first two lines again. Check it with `netsh interface portproxy show all`. (Do not use this together with mirrored networking.)
+WSL's own address changes after a restart, so the rule must be redone then: run `netsh interface portproxy delete v4tov4 listenaddress=0.0.0.0 listenport=8002` and the first two lines again. Check it with `netsh interface portproxy show all`. (Do not use this together with mirrored networking.)
 
-Test on the PC first with `http://localhost:8765`, then from the Mac or iPhone with `http://192.168.0.33:8765`.
+Test on the PC first with `http://localhost:8002`, then from the Mac or iPhone with `http://192.168.0.33:8002`.
 
 **Security:** the dashboard is protected only by the password, sent unencrypted (plain HTTP), and it shows file and folder names. It is for the home network only. Never forward the port on the router and do not reuse an important password.
 
@@ -324,10 +324,12 @@ All settings are in `~/.config/media-organizer/config.toml`; `deploy/config.exam
 | Key | Default | Meaning |
 |---|---|---|
 | `web_password` | (none, required) | Dashboard password |
-| `web_port` | 8765 | Dashboard port |
+| `web_port` | 8002 | Dashboard port |
 | `size_threshold_mb` | 400 | Downloads video size above which it goes to `_TO_CONVERT` |
 | `scan_interval_h` | 6 | Hours between scans of intake and Downloads |
 | `full_scan_interval_h` | 168 | Hours between whole-library scans |
+| `folders_refresh_min` | 5 | Minutes between recounts of the D: folder sizes shown in "Biggest folders" (0 = only at scans). Takes about a second |
+| `mac_folders_refresh_min` | 60 | The same for MEGA; only while the Mac is reachable (0 = only at scans) |
 | `image_workers` | 4 | Images converted in parallel (videos always one at a time) |
 | `min_free_gb` | 2 | Free space to keep on the destination drive |
 | `mac_host` | `mac` | The ssh alias of the Mac |

@@ -239,7 +239,11 @@ def _discard(loc: Location, relpath: str) -> None:
         pass
 
 
-def refresh_folders(con, loc: Location) -> None:
+def refresh_folders(con, loc: Location, *, snapshot_every_s: float = 0) -> None:
+    """Recount folder sizes for the dashboard; record a size/free-space snapshot.
+
+    snapshot_every_s > 0 skips the snapshot when one was taken more recently (the light
+    refresh runs every few minutes and must not flood the history chart)."""
     if not loc.root.exists():
         return
     finished = {r["relpath"] for r in con.execute(
@@ -254,6 +258,15 @@ def refresh_folders(con, loc: Location) -> None:
         name = posixpath.basename(entry.relpath)
         if rules.kind_of(name) and (rules.is_compressed_name(name) or entry.relpath in finished):
             row[2] += 1
+    if not stats and con.execute("SELECT 1 FROM folders WHERE location=? LIMIT 1",
+                                 (loc.name,)).fetchone():
+        return  # an unmounted drive looks empty: keep the last good numbers
     db.replace_folders(con, loc.name, [(f, *v) for f, v in sorted(stats.items())])
-    db.add_snapshot(con, ts=time.time(), location=loc.name,
+    now = time.time()
+    if snapshot_every_s:
+        last = con.execute("SELECT MAX(ts) FROM snapshots WHERE location=?",
+                           (loc.name,)).fetchone()[0]
+        if last is not None and now - last < snapshot_every_s:
+            return
+    db.add_snapshot(con, ts=now, location=loc.name,
                     total_bytes=sum(v[0] for v in stats.values()), free_bytes=loc.free_bytes())

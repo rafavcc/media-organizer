@@ -105,7 +105,7 @@ class Config:
     x265_pools: int = 10
     hevc_bloat_bpp: float = 0.07
     min_free_gb: float = 2.0
-    web_port: int = 8765
+    web_port: int = 8002
     web_password: str = ""
     # derived
     @property
@@ -652,7 +652,7 @@ class Service:
 
 **Content:**
 - `media-organizer.service` (systemd user unit): `ExecStart=/usr/bin/python3 -m media_organizer.cli run`, `WorkingDirectory=` the repo path, `Environment=PYTHONUNBUFFERED=1`, `CPUQuota=960%`, `Nice=19`, `IOSchedulingClass=idle`, `Restart=on-failure`, `RestartSec=60`, `KillSignal=SIGTERM`, `TimeoutStopSec=60`, `WantedBy=default.target`.
-- `README.md`, written for the owner, covering: what it does (one paragraph); install (copy `config.example.toml` to `~/.config/media-organizer/config.toml` and set `web_password`; `media-organizer import-legacy`; `media-organizer scan --dry-run`; `systemctl --user enable --now media-organizer`; `loginctl enable-linger`); making the dashboard reachable from other devices (WSL mirrored networking in `.wslconfig`, or a `netsh interface portproxy` rule plus a Windows firewall rule for the port, both as copy-paste PowerShell); keeping WSL running after boot (a Windows Task Scheduler entry running `wsl.exe -d <distro> --exec /bin/true` at logon); Mac prerequisites (Remote Login, full disk access for remote users, fixed IP 192.168.0.30, the `Host mac` ssh alias); daily operation (`status`, dashboard address `http://192.168.0.33:8765`, `pause` / `resume`, `retry-errors`, where the log is); the meaning of each status and reason; recovery (service stopped mid-encode, Mac away, D: full, database lost — the `_compressed` suffix prevents double compression and rejected files are simply tried once more); cutover from the old cron job (`crontab -e`, remove the `pipeline.py` line) and rollback (stop the service, restore the cron line).
+- `README.md`, written for the owner, covering: what it does (one paragraph); install (copy `config.example.toml` to `~/.config/media-organizer/config.toml` and set `web_password`; `media-organizer import-legacy`; `media-organizer scan --dry-run`; `systemctl --user enable --now media-organizer`; `loginctl enable-linger`); making the dashboard reachable from other devices (WSL mirrored networking in `.wslconfig`, or a `netsh interface portproxy` rule plus a Windows firewall rule for the port, both as copy-paste PowerShell); keeping WSL running after boot (a Windows Task Scheduler entry running `wsl.exe -d <distro> --exec /bin/true` at logon); Mac prerequisites (Remote Login, full disk access for remote users, fixed IP 192.168.0.30, the `Host mac` ssh alias); daily operation (`status`, dashboard address `http://192.168.0.33:8002`, `pause` / `resume`, `retry-errors`, where the log is); the meaning of each status and reason; recovery (service stopped mid-encode, Mac away, D: full, database lost — the `_compressed` suffix prevents double compression and rejected files are simply tried once more); cutover from the old cron job (`crontab -e`, remove the `pipeline.py` line) and rollback (stop the service, restore the cron line).
 
 - [ ] **Step 1:** Write both files.
 - [ ] **Step 2:** Run `systemd-analyze verify --user deploy/media-organizer.service` (warnings about the unit not being installed are fine; syntax errors are not) and `python3 -m unittest discover -s tests -v`. Expected: all pass.

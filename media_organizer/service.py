@@ -23,6 +23,7 @@ from .worker import finalize_published
 log = logging.getLogger(__name__)
 
 TICK_S = 30
+SNAPSHOT_EVERY_S = 3600  # history-chart points, however often the folders are recounted
 IDLE_S = 15
 MAC_CACHE_S = 60
 CURRENT_EVERY_S = 10
@@ -205,9 +206,31 @@ class Service:
                 return
             self.mac_up()
             run_scan(self.con, scan, self.locs, self.cfg, up, self._mac_down)
+        self.refresh_folder_charts()
         finalize_published(self.con, self.locs, self.cfg, cached)
         run_sorter(self.con, self.locs, self.cfg)
         db.meta_set(self.con, "mac_reachable", "1" if self.mac_up() else "0")
+
+    def refresh_folder_charts(self, now: float | None = None) -> None:
+        """Recount the folders behind the dashboard's "biggest folders" charts when due."""
+        now = time.time() if now is None else now
+        for name, minutes in (("d", self.cfg.folders_refresh_min),
+                              ("mega", self.cfg.mac_folders_refresh_min)):
+            loc = self.locs.get(name)
+            if loc is None or minutes <= 0 or self.stop.is_set():
+                continue
+            key = f"folders_at_{name}"
+            if now - float(db.meta_get(self.con, key) or 0) < minutes * 60:
+                continue
+            if loc.is_mac and not self.mac_up():
+                continue
+            db.meta_set(self.con, key, str(now))  # also after a failure: no retry every tick
+            try:
+                refresh_folders(self.con, loc, snapshot_every_s=SNAPSHOT_EVERY_S)
+            except MacUnreachable:
+                self._mac_down()
+            except Exception:
+                log.exception("folder refresh for %s failed", name)
 
     # -- working --
     def _report(self, con, force: bool = False) -> None:

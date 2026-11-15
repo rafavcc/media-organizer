@@ -141,6 +141,74 @@ class SchedulerTests(Base):
         self.assertEqual(db.last_scan(self.con, "d-full")["message"], "suspect: empty listing")
 
 
+class FolderChartTests(Base):
+    def folders(self, loc="d"):
+        return {r["folder"]: r["bytes"] for r in
+                self.con.execute("SELECT folder, bytes FROM folders WHERE location=?", (loc,))}
+
+    def snapshots(self, loc="d"):
+        return self.con.execute("SELECT COUNT(*) FROM snapshots WHERE location=?",
+                                (loc,)).fetchone()[0]
+
+    def test_d_folders_follow_changes_every_few_minutes(self):
+        (self.d.root / "a").mkdir()
+        (self.d.root / "a" / "x.bin").write_bytes(b"1" * 100)
+        self.svc.refresh_folder_charts(now=T)
+        self.assertEqual(self.folders(), {"a": 100})
+        (self.d.root / "a" / "y.bin").write_bytes(b"1" * 50)
+        self.svc.refresh_folder_charts(now=T + 4 * 60)  # too soon
+        self.assertEqual(self.folders(), {"a": 100})
+        self.svc.refresh_folder_charts(now=T + 5 * 60)
+        self.assertEqual(self.folders(), {"a": 150})
+
+    def test_snapshots_are_at_most_hourly(self):
+        (self.d.root / "a").mkdir()
+        (self.d.root / "a" / "x.bin").write_bytes(b"1")
+        for minutes in (0, 5, 10, 55):
+            self.svc.refresh_folder_charts(now=T + minutes * 60)
+        self.assertEqual(self.snapshots(), 1)
+        self.con.execute("UPDATE snapshots SET ts = ts - 7200")  # the point is now two hours old
+        self.con.commit()
+        self.svc.refresh_folder_charts(now=T + 70 * 60)
+        self.assertEqual(self.snapshots(), 2)
+
+    def test_zero_minutes_disables_the_refresh(self):
+        self.svc.cfg = test_config(self.tmp, folders_refresh_min=0, mac_folders_refresh_min=0)
+        (self.d.root / "x.bin").write_bytes(b"1")
+        self.svc.refresh_folder_charts(now=T)
+        self.assertEqual(self.folders(), {})
+
+    def test_mega_waits_for_the_mac_and_an_hour(self):
+        (self.mega.root / "m").mkdir()
+        (self.mega.root / "m" / "x.bin").write_bytes(b"1" * 10)
+        self.set_mac(False)
+        self.svc.refresh_folder_charts(now=T)
+        self.assertEqual(self.folders("mega"), {})
+        self.set_mac(True)
+        self.svc._mac_at = None
+        self.svc.refresh_folder_charts(now=T + 1)
+        self.assertEqual(self.folders("mega"), {"m": 10})
+        (self.mega.root / "m" / "y.bin").write_bytes(b"1" * 5)
+        self.svc.refresh_folder_charts(now=T + 30 * 60)
+        self.assertEqual(self.folders("mega"), {"m": 10})
+        self.svc.refresh_folder_charts(now=T + 61 * 60)
+        self.assertEqual(self.folders("mega"), {"m": 15})
+
+    def test_mac_dropping_mid_refresh_is_not_an_error(self):
+        with mock.patch("media_organizer.service.refresh_folders", side_effect=MacUnreachable):
+            self.svc.refresh_folder_charts(now=T)  # must not raise
+        self.assertFalse(self.svc.mac_cached())
+
+    def test_unmounted_empty_drive_keeps_the_last_numbers(self):
+        (self.d.root / "a").mkdir()
+        (self.d.root / "a" / "x.bin").write_bytes(b"1" * 100)
+        self.svc.refresh_folder_charts(now=T)
+        (self.d.root / "a" / "x.bin").unlink()
+        (self.d.root / "a").rmdir()
+        self.svc.refresh_folder_charts(now=T + 6 * 60)
+        self.assertEqual(self.folders(), {"a": 100})
+
+
 class WorkTests(Base):
     def test_end_to_end(self):
         self.cfg.sorter.write_text(STUB_SORTER)

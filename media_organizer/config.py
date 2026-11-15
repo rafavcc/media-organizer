@@ -25,6 +25,8 @@ class Config:
     scan_interval_h: float = 6.0
     full_scan_interval_h: float = 168.0
     mac_retry_h: float = 1.0
+    folders_refresh_min: float = 5.0  # D: folder sizes for the dashboard (0 = only at scans)
+    mac_folders_refresh_min: float = 60.0  # the same for MEGA, only while the Mac is up
     min_age_min: int = 10
     mac_delete_delay_s: int = 5
     image_workers: int = 4
@@ -36,7 +38,7 @@ class Config:
     encode_stall_min: float = 30.0  # kill ffmpeg when its progress has not moved this long
     hevc_bloat_bpp: float = 0.07
     min_free_gb: float = 2.0
-    web_port: int = 8765
+    web_port: int = 8002
     web_password: str = ""
 
     @property
