@@ -29,7 +29,7 @@ h2 { font-size: .8rem; letter-spacing: .06em; text-transform: uppercase; color: 
 .status { color: var(--muted); font-size: .9rem; display: flex; flex-wrap: wrap; gap: 4px 16px; }
 .status .warn { color: var(--bad); }
 .status .pill { color: var(--accent); font-weight: 600; }
-.tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 24px; }
+.tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 24px; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 20px; }
 .card .label { color: var(--muted); font-size: .8rem; }
 .card .value { font-size: 1.7rem; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
@@ -52,7 +52,8 @@ h2 { font-size: .8rem; letter-spacing: .06em; text-transform: uppercase; color: 
 .legend i { display: inline-block; width: 18px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
 .work p { margin: 0 0 8px; }
 .muted { color: var(--muted); }
-.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.tiles > *, .cols > div, .bars > * { min-width: 0; }
 .cols h3 { font-size: .9rem; margin: 0 0 8px; }
 .scroll { overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; font-size: .88rem; }
@@ -65,7 +66,7 @@ details ul { margin: 8px 0 0; padding-left: 18px; word-break: break-all; font-si
 .empty { color: var(--muted); padding: 8px 0; }
 @media (max-width: 700px) {
   main { padding: 16px; }
-  .tiles, .cols { grid-template-columns: 1fr; }
+  .tiles, .cols { grid-template-columns: minmax(0, 1fr); }
 }
 </style>
 </head>
@@ -95,7 +96,7 @@ details ul { margin: 8px 0 0; padding-left: 18px; word-break: break-all; font-si
 "use strict";
 var GIB = 1024 * 1024 * 1024, MIB = 1024 * 1024;
 var SVG_NS = "http:" + "//www.w3.org/2000/svg"; // split so the file holds no URL literal
-var lostConnection = false, last = null;
+var lostConnection = false, last = null, busy = false;
 
 function el(tag, cls, text, kids) {
   var n = document.createElement(tag);
@@ -177,19 +178,19 @@ function renderFirstPass(s) {
 function renderChart(s) {
   var days = s.daily, W = 640, H = 240, L = 52, R = 14, T = 12, B = 30;
   var series = [["d", "D: library", "var(--c-d)"], ["mega", "MEGA", "var(--c-mega)"]];
-  var cum = {}, max = 0;
+  var cum = {}, hi = 0, lo = 0;
   series.forEach(function (sr) {
     var run = 0;
     cum[sr[0]] = days.map(function (day) { run += day[sr[0]]; return run; });
-    max = Math.max(max, run);
+    cum[sr[0]].forEach(function (v) { hi = Math.max(hi, v); lo = Math.min(lo, v); });
   });
-  if (max <= 0) { fill("chart", [empty("No conversions yet")]); return; }
+  if (hi === lo) { fill("chart", [empty("No conversions yet")]); return; }
   var x = function (i) { return L + (days.length > 1 ? i * (W - L - R) / (days.length - 1) : 0); };
-  var y = function (v) { return T + (H - T - B) * (1 - v / max); };
+  var y = function (v) { return T + (H - T - B) * (1 - (v - lo) / (hi - lo)); };
   var root = svg("svg", {viewBox: "0 0 " + W + " " + H, role: "img",
                          "aria-label": "Cumulative GB freed per day, last 30 days"});
   [0, 0.5, 1].forEach(function (f) {
-    var v = max * f;
+    var v = lo + (hi - lo) * f;
     root.appendChild(svg("line", {x1: L, x2: W - R, y1: y(v), y2: y(v), "class": "grid"}));
     root.appendChild(svg("text", {x: L - 8, y: y(v) + 4, "text-anchor": "end"}, (v / GIB).toFixed(1) + " GB"));
   });
@@ -282,14 +283,19 @@ function render(s) {
 }
 
 function refresh() {
-  fetch("/api/summary", {cache: "no-store", credentials: "same-origin"})
+  if (busy) return;
+  busy = true;
+  var ctl = new AbortController();
+  var timer = setTimeout(function () { ctl.abort(); }, 20000);
+  fetch("/api/summary", {cache: "no-store", credentials: "same-origin", signal: ctl.signal})
     .then(function (r) { if (!r.ok) throw new Error("status " + r.status); return r.json(); })
     .then(function (s) { lostConnection = false; last = s; render(s); })
     .catch(function () {
       lostConnection = true;
       if (last) renderStatus(last);
-      else fill("status", [el("span", "warn", "Connection lost — retrying")]);
-    });
+      else fill("status", [el("span", "warn", "Connection lost \u2014 retrying")]);
+    })
+    .then(function () { clearTimeout(timer); busy = false; });
 }
 refresh();
 setInterval(refresh, 30000);

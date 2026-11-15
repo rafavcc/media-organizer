@@ -1,4 +1,8 @@
 import base64
+import contextlib
+import io
+import socket
+import time
 import json
 import logging
 import tempfile
@@ -140,7 +144,50 @@ class ServerSetupTests(unittest.TestCase):
             self.assertEqual(resp.status, 200)
 
 
+class HardeningTests(WebCase):
+    def test_idle_connection_is_closed(self):
+        web._Handler.timeout = 1
+        self.addCleanup(setattr, web._Handler, "timeout", 15)
+        self.assertEqual(web._Handler.__dict__.get("timeout"), 1)
+        sock = socket.create_connection(("127.0.0.1", self.server.server_address[1]))
+        self.addCleanup(sock.close)
+        sock.settimeout(10)
+        start = time.time()
+        self.assertEqual(sock.recv(10), b"")
+        self.assertLess(time.time() - start, 8)
+
+    def test_handler_timeout_default(self):
+        self.assertEqual(web._Handler.timeout, 15)
+
+    def test_client_disconnect_is_quiet(self):
+        err = io.StringIO()
+        for exc in (BrokenPipeError(), ConnectionResetError()):
+            try:
+                raise exc
+            except OSError:
+                with contextlib.redirect_stderr(err):
+                    self.server.handle_error(None, ("127.0.0.1", 1))
+        self.assertEqual(err.getvalue(), "")
+
+    def test_other_errors_keep_default_traceback(self):
+        err = io.StringIO()
+        try:
+            raise RuntimeError("boom")
+        except RuntimeError:
+            with contextlib.redirect_stderr(err):
+                self.server.handle_error(None, ("127.0.0.1", 1))
+        self.assertIn("boom", err.getvalue())
+
+
 class PageTests(unittest.TestCase):
+    def test_grids_cannot_overflow_viewport(self):
+        text = PAGE.read_text(encoding="utf-8")
+        self.assertIn("grid-template-columns: minmax(0, 1fr) minmax(0, 1fr)", text)
+        self.assertIn(".tiles, .cols { grid-template-columns: minmax(0, 1fr); }", text)
+        self.assertIn(".cols > div", text)
+        self.assertIn("min-width: 0", text)
+        self.assertNotIn("1fr 1fr", text)
+
     def test_file_is_self_contained(self):
         text = PAGE.read_text(encoding="utf-8")
         for bad in ("http://", "https://", "innerHTML"):

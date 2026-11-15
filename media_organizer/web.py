@@ -6,6 +6,7 @@ import binascii
 import hmac
 import json
 import logging
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -20,9 +21,10 @@ REALM = "media-organizer"
 
 class _Handler(BaseHTTPRequestHandler):
     server_version = "media-organizer"
+    timeout = 15  # seconds; an idle client must not hold a thread forever
 
     def log_message(self, format, *args):  # never log headers, so never the password
-        log.info("web %s %s", self.address_string(), self.requestline.split(" HTTP")[0])
+        log.info("web %s %r", self.address_string(), self.requestline.split(" HTTP")[0])
 
     def _authorized(self) -> bool:
         header = self.headers.get("Authorization", "")
@@ -44,8 +46,7 @@ class _Handler(BaseHTTPRequestHandler):
         for key, value in extra:
             self.send_header(key, value)
         self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
+        self.wfile.write(body)
 
     def _text(self, code: int, text: str, extra=()) -> None:
         self._send(code, text.encode(), "text/plain; charset=utf-8", extra)
@@ -79,6 +80,12 @@ class DashboardServer(ThreadingHTTPServer):
         super().__init__(address, _Handler)
         self.cfg = cfg
         self.password = cfg.web_password
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            log.debug("client %s went away", client_address)
+            return
+        super().handle_error(request, client_address)
 
 
 def make_server(cfg: Config, host: str = "0.0.0.0") -> ThreadingHTTPServer:
