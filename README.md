@@ -284,7 +284,7 @@ Each file the program knows has a status, and often a reason. Statuses appear in
 | `queued` | `no-space` | Not enough free space: the destination needs 75% of the original plus `min_free_gb`, and the work folder 2 times the original plus `min_free_gb` (checked before anything is copied; also set when writing the result finds the drive full) | Left alone for one hour, then tried again; other files go first meanwhile. `status` counts these as `waiting for space`; see "D: nearly full" |
 | `queued` | `name-taken` | Another file took the planned name at the last moment | Planned again at once with a fresh name |
 | `running` | | Being converted right now | If the service stops, it goes back to `queued` |
-| `published` | | New file written and in place; waiting to delete the original (on the Mac it waits about a minute so iCloud can catch up) | Original deleted when its checks pass |
+| `published` | | New file written and in place; waiting to delete the original (on the Mac it waits a few seconds, `mac_delete_delay_s`, default 5, before deleting) | Original deleted when its checks pass |
 | `done` | | Converted, original deleted | Never touched again |
 | `done` | `post-step-failed` | Converted, but moving it to `_CONVERTED` or running the sorter failed | Retried automatically; look in the log |
 | `skipped` | `efficient` | A video already in AV1, or in H.265 at a bitrate that is already low | Left alone |

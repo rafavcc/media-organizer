@@ -26,7 +26,7 @@ class Config:
     full_scan_interval_h: float = 168.0
     mac_retry_h: float = 1.0
     min_age_min: int = 10
-    mac_delete_delay_s: int = 60
+    mac_delete_delay_s: int = 5
     image_workers: int = 4
     min_gain_ratio: float = 0.75
     min_ssim: float = 0.95
