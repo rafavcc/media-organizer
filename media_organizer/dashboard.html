@@ -45,16 +45,16 @@ h2 { font-size: .8rem; letter-spacing: .06em; text-transform: uppercase; color: 
 .bar { height: 10px; background: var(--track); border-radius: 5px; overflow: hidden; margin-top: 4px; }
 .bar > div { height: 100%; background: var(--accent); border-radius: 5px; }
 .chart { padding: 12px; }
-.chart svg { width: 100%; height: auto; display: block; }
-.chart text { fill: var(--muted); font-size: 11px; font-family: inherit; }
-.chart .grid { stroke: var(--line); stroke-width: 1; }
-.legend { display: flex; gap: 16px; font-size: .85rem; color: var(--muted); margin: 0 0 8px 8px; }
-.legend i { display: inline-block; width: 18px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+.chartbox { position: relative; width: 100%; height: 240px; }
+.chartbox.tall { height: 320px; }
+.chartbox canvas { max-width: 100%; }
+.chart .empty { padding: 12px 8px; }
 .work p { margin: 0 0 8px; }
 .muted { color: var(--muted); }
 .cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
 .tiles > *, .cols > div, .bars > * { min-width: 0; }
 .cols h3 { font-size: .9rem; margin: 0 0 8px; }
+.cols .chart { margin-bottom: 12px; }
 .scroll { overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; font-size: .88rem; }
 th, td { padding: 6px 10px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
@@ -82,20 +82,45 @@ details ul { margin: 8px 0 0; padding-left: 18px; word-break: break-all; font-si
   <h2>First pass</h2>
   <div class="bars" id="firstpass"></div>
   <h2>Storage freed, last 30 days</h2>
-  <div class="card chart" id="chart"></div>
+  <div class="card chart" id="chart-cum">
+    <div class="chartbox"><canvas role="img" aria-label="Cumulative GB freed per day, last 30 days"></canvas></div>
+    <div class="empty" hidden></div>
+  </div>
+  <h2>Freed per day</h2>
+  <div class="card chart" id="chart-daily">
+    <div class="chartbox"><canvas role="img" aria-label="GB freed per day, last 30 days"></canvas></div>
+    <div class="empty" hidden></div>
+  </div>
   <h2>Work</h2>
   <div class="work" id="work"></div>
   <h2>Biggest folders</h2>
-  <div class="cols" id="folders"></div>
+  <div class="cols">
+    <div>
+      <h3>D: library</h3>
+      <div class="card chart" id="chart-folders-d">
+        <div class="chartbox tall"><canvas role="img" aria-label="Biggest D: folders in GB"></canvas></div>
+        <div class="empty" hidden></div>
+      </div>
+      <div id="folders-d"></div>
+    </div>
+    <div>
+      <h3>MEGA</h3>
+      <div class="card chart" id="chart-folders-mega">
+        <div class="chartbox tall"><canvas role="img" aria-label="Biggest MEGA folders in GB"></canvas></div>
+        <div class="empty" hidden></div>
+      </div>
+      <div id="folders-mega"></div>
+    </div>
+  </div>
   <h2>Recent activity</h2>
   <div class="scroll" id="recent"></div>
   <h2>Problems</h2>
   <div id="problems"></div>
 </main>
+<script src="static/chart.umd.min.js"></script>
 <script>
 "use strict";
 var GIB = 1024 * 1024 * 1024, MIB = 1024 * 1024;
-var SVG_NS = "http:" + "//www.w3.org/2000/svg"; // split so the file holds no URL literal
 var lostConnection = false, last = null, busy = false;
 
 function el(tag, cls, text, kids) {
@@ -103,12 +128,6 @@ function el(tag, cls, text, kids) {
   if (cls) n.className = cls;
   if (text !== undefined && text !== null) n.textContent = text;
   (kids || []).forEach(function (k) { n.appendChild(k); });
-  return n;
-}
-function svg(tag, attrs, text) {
-  var n = document.createElementNS(SVG_NS, tag);
-  Object.keys(attrs || {}).forEach(function (k) { n.setAttribute(k, attrs[k]); });
-  if (text !== undefined) n.textContent = text;
   return n;
 }
 function fill(id, kids) {
@@ -175,44 +194,127 @@ function renderFirstPass(s) {
   }));
 }
 
-function renderChart(s) {
-  var days = s.daily, W = 640, H = 240, L = 52, R = 14, T = 12, B = 30;
-  var series = [["d", "D: library", "var(--c-d)"], ["mega", "MEGA", "var(--c-mega)"]];
-  var cum = {}, hi = 0, lo = 0;
-  series.forEach(function (sr) {
-    var run = 0;
-    cum[sr[0]] = days.map(function (day) { run += day[sr[0]]; return run; });
-    cum[sr[0]].forEach(function (v) { hi = Math.max(hi, v); lo = Math.min(lo, v); });
-  });
-  if (hi === lo) { fill("chart", [empty("No conversions yet")]); return; }
-  var x = function (i) { return L + (days.length > 1 ? i * (W - L - R) / (days.length - 1) : 0); };
-  var y = function (v) { return T + (H - T - B) * (1 - (v - lo) / (hi - lo)); };
-  var root = svg("svg", {viewBox: "0 0 " + W + " " + H, role: "img",
-                         "aria-label": "Cumulative GB freed per day, last 30 days"});
-  [0, 0.5, 1].forEach(function (f) {
-    var v = lo + (hi - lo) * f;
-    root.appendChild(svg("line", {x1: L, x2: W - R, y1: y(v), y2: y(v), "class": "grid"}));
-    root.appendChild(svg("text", {x: L - 8, y: y(v) + 4, "text-anchor": "end"}, (v / GIB).toFixed(1) + " GB"));
-  });
-  [0, Math.floor((days.length - 1) / 2), days.length - 1].forEach(function (i, k) {
-    root.appendChild(svg("text", {x: x(i), y: H - 8, "text-anchor": k === 0 ? "start" : k === 1 ? "middle" : "end"},
-                         days[i].date));
-  });
-  series.forEach(function (sr) {
-    var pts = cum[sr[0]].map(function (v, i) { return x(i).toFixed(1) + "," + y(v).toFixed(1); });
-    root.appendChild(svg("polyline", {points: pts.join(" "), fill: "none", stroke: sr[2],
-                                      "stroke-width": 2, "stroke-linejoin": "round"}));
-    cum[sr[0]].forEach(function (v, i) {
-      var dot = svg("circle", {cx: x(i), cy: y(v), r: 3, fill: sr[2]});
-      dot.appendChild(svg("title", {}, sr[1] + " " + days[i].date + ": " + (v / GIB).toFixed(1) + " GB total"));
-      root.appendChild(dot);
+var charts = {}; // created once, updated in place on every refresh
+var DAY_SERIES = [["d", "D: library", "--c-d"], ["mega", "MEGA", "--c-mega"]];
+
+function theme() {
+  var cs = getComputedStyle(document.documentElement);
+  function v(name) { return cs.getPropertyValue(name).trim(); }
+  return {d: v("--c-d"), mega: v("--c-mega"), text: v("--muted"), grid: v("--line")};
+}
+function gbNum(n) { return (n || 0) / GIB; }
+function gbLabel(v) { return Number(v).toFixed(1) + " GB"; }
+function shorten(t) { t = String(t); return t.length > 26 ? t.slice(0, 25) + "\u2026" : t; }
+
+function chartsMissing() { return typeof window.Chart !== "function"; }
+function unavailable(id) {
+  var card = document.getElementById(id);
+  card.querySelector(".chartbox").hidden = true;
+  var msg = card.querySelector(".empty");
+  msg.textContent = "Charts unavailable";
+  msg.hidden = false;
+}
+
+function axisStyle(t, axis) {
+  return {stacked: false, grid: {color: t.grid}, border: {color: t.grid}, ticks: {color: t.text}};
+}
+function baseOptions(t, extra) {
+  var o = {
+    responsive: true, maintainAspectRatio: false, animation: false,
+    interaction: {mode: "index", intersect: false},
+    plugins: {
+      legend: {labels: {color: t.text, boxWidth: 14}},
+      tooltip: {callbacks: {label: function (c) {
+        var v = c.parsed[c.chart.options.indexAxis === "y" ? "x" : "y"];
+        return (c.dataset.label ? c.dataset.label + ": " : "") + gbLabel(v);
+      }}}
+    },
+    scales: {x: axisStyle(t), y: axisStyle(t)}
+  };
+  extra(o);
+  return o;
+}
+
+function dayData(s, cumulative, t) {
+  var days = s.daily;
+  return {
+    labels: days.map(function (d) { return d.date; }),
+    datasets: DAY_SERIES.map(function (sr) {
+      var run = 0, color = t[sr[0]];
+      var data = days.map(function (d) { run += gbNum(d[sr[0]]); return cumulative ? run : gbNum(d[sr[0]]); });
+      return cumulative
+        ? {label: sr[1], data: data, borderColor: color, backgroundColor: color, borderWidth: 2,
+           pointRadius: 2, tension: 0}
+        : {label: sr[1], data: data, borderColor: color, backgroundColor: color, borderWidth: 0};
+    })
+  };
+}
+function folderData(list, key, t) {
+  var top = list.slice().sort(function (a, b) { return b.bytes - a.bytes; }).slice(0, 10);
+  return {
+    labels: top.map(function (f) { return f.folder; }),
+    datasets: [{label: "Size", data: top.map(function (f) { return gbNum(f.bytes); }),
+                borderWidth: 0, backgroundColor: t[key], borderColor: t[key]}]
+  };
+}
+
+function makeChart(id, config) {
+  var canvas = document.getElementById(id).querySelector("canvas");
+  charts[id] = new window.Chart(canvas, config);
+}
+function gbTicks(o, axis) { o.scales[axis].ticks.callback = function (v) { return gbLabel(v); }; }
+function dateTicks(o) { o.scales.x.ticks.maxTicksLimit = 6; o.scales.x.ticks.maxRotation = 0; }
+
+function renderCharts(s) {
+  var ids = ["chart-cum", "chart-daily", "chart-folders-d", "chart-folders-mega"];
+  if (chartsMissing()) { ids.forEach(unavailable); return; }
+  try { drawCharts(s, ids); } catch (err) { ids.forEach(unavailable); }
+}
+function drawCharts(s, ids) {
+  var t = theme();
+  var data = {
+    "chart-cum": dayData(s, true, t), "chart-daily": dayData(s, false, t),
+    "chart-folders-d": folderData(s.folders.d, "d", t),
+    "chart-folders-mega": folderData(s.folders.mega, "mega", t)
+  };
+  if (!charts["chart-cum"]) {
+    makeChart("chart-cum", {type: "line", data: data["chart-cum"], options: baseOptions(t, function (o) {
+      gbTicks(o, "y"); dateTicks(o); }) });
+    makeChart("chart-daily", {type: "bar", data: data["chart-daily"], options: baseOptions(t, function (o) {
+      gbTicks(o, "y"); dateTicks(o); o.scales.x.stacked = true; o.scales.y.stacked = true; }) });
+    ["d", "mega"].forEach(function (key) {
+      makeChart("chart-folders-" + key, {type: "bar", data: data["chart-folders-" + key],
+        options: baseOptions(t, function (o) {
+          o.indexAxis = "y"; o.plugins.legend.display = false; gbTicks(o, "x");
+          o.scales.y.ticks.callback = function (v) { return shorten(this.getLabelForValue(v)); };
+          o.plugins.tooltip.callbacks.title = function (items) { return items.length ? items[0].label : ""; };
+        }) });
     });
+  } else {
+    ids.forEach(function (id) { charts[id].data = data[id]; charts[id].update("none"); });
+  }
+}
+
+function applyTheme() {
+  if (chartsMissing()) return;
+  var t = theme();
+  Object.keys(charts).forEach(function (id) {
+    var c = charts[id], o = c.options;
+    o.plugins.legend.labels.color = t.text;
+    ["x", "y"].forEach(function (a) {
+      o.scales[a].ticks.color = t.text; o.scales[a].grid.color = t.grid; o.scales[a].border.color = t.grid;
+    });
+    var keys = id.indexOf("folders-") >= 0 ? [id.slice(id.indexOf("folders-") + 8)] : ["d", "mega"];
+    c.data.datasets.forEach(function (ds, i) {
+      ds.borderColor = ds.backgroundColor = t[keys[i]];
+    });
+    c.update("none");
   });
-  var legend = el("div", "legend", null, series.map(function (sr) {
-    var sw = el("i"); sw.style.background = sr[2];
-    return el("span", null, null, [sw, document.createTextNode(sr[1])]);
-  }));
-  fill("chart", [legend, root]);
+}
+if (window.matchMedia) {
+  var scheme = window.matchMedia("(prefers-color-scheme: dark)");
+  if (scheme.addEventListener) scheme.addEventListener("change", applyTheme);
+  else if (scheme.addListener) scheme.addListener(applyTheme);
 }
 
 function scanLine(sc) {
@@ -246,15 +348,16 @@ function table(headers, rows) {
   });
   return el("div", "scroll", null, [el("table", null, null, [el("thead", null, null, [head]), el("tbody", null, null, body)])]);
 }
-function folderTable(title, list) {
-  var kids = [el("h3", null, title)];
+function folderTable(list) {
+  var kids = [];
   if (!list.length) kids.push(empty("No folders yet"));
   else kids.push(table([["Folder", false, "name"], ["Size", true], ["Files", true], ["Compressed", true]],
     list.map(function (f) { return [f.folder, size(f.bytes), count(f.files), pct(f.compressed_files, f.files) + "%"]; })));
   return el("div", null, null, kids);
 }
 function renderFolders(s) {
-  fill("folders", [folderTable("D: library", s.folders.d), folderTable("MEGA", s.folders.mega)]);
+  fill("folders-d", [folderTable(s.folders.d)]);
+  fill("folders-mega", [folderTable(s.folders.mega)]);
 }
 
 function renderRecent(s) {
@@ -283,7 +386,7 @@ function renderProblems(s) {
 }
 
 function render(s) {
-  renderStatus(s); renderTiles(s); renderMilestones(s); renderFirstPass(s); renderChart(s);
+  renderStatus(s); renderTiles(s); renderMilestones(s); renderFirstPass(s); renderCharts(s);
   renderWork(s); renderFolders(s); renderRecent(s); renderProblems(s);
 }
 

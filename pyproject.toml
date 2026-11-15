@@ -15,4 +15,4 @@ media-organizer = "media_organizer.cli:main"
 packages = ["media_organizer"]
 
 [tool.setuptools.package-data]
-media_organizer = ["dashboard.html"]
+media_organizer = ["dashboard.html", "static/*.js"]

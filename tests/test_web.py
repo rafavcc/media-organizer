@@ -17,6 +17,7 @@ from media_organizer import db, web
 from tests.helpers import test_config
 
 PAGE = Path(web.__file__).with_name("dashboard.html")
+STATIC = Path(web.__file__).with_name("static") / "chart.umd.min.js"
 PASSWORD = "s3cret"
 
 
@@ -113,6 +114,42 @@ class RouteTests(WebCase):
                 urllib.request.urlopen(req, timeout=10)
             self.addCleanup(ctx.exception.close)
             self.assertEqual(ctx.exception.code, 405, method)
+
+
+class StaticTests(WebCase):
+    def test_chart_library_needs_auth(self):
+        self.assertEqual(self.get("/static/chart.umd.min.js")[0], 401)
+        self.assertEqual(self.get("/static/chart.umd.min.js", auth("nope"))[0], 401)
+
+    def test_chart_library_served_byte_identical(self):
+        status, headers, body = self.get("/static/chart.umd.min.js", auth(PASSWORD))
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "application/javascript; charset=utf-8")
+        self.assertEqual(headers.get_all("Cache-Control"), ["max-age=86400"])
+        self.assertEqual(body, STATIC.read_bytes())
+        self.assertIn(b"Chart.js v4.4.1", body[:200])
+
+    def test_no_other_static_paths(self):
+        for path in ("/static/", "/static", "/static/other.js", "/static/chart.umd.min.js/",
+                     "/static/chart.umd.min.js?x=1", "/static/../web.py", "/static/%2e%2e/web.py",
+                     "/static/dashboard.html"):
+            self.assertEqual(self.get(path, auth(PASSWORD))[0], 404, path)
+
+    def test_page_references_library_before_its_script(self):
+        text = PAGE.read_text(encoding="utf-8")
+        ref = '<script src="static/chart.umd.min.js"></script>'
+        self.assertIn(ref, text)
+        self.assertLess(text.index(ref), text.index('<script>'))
+        self.assertIn("Charts unavailable", text)
+        self.assertNotIn("createElementNS", text)
+
+    def test_package_data_includes_static_file(self):
+        import tomllib
+        root = Path(web.__file__).parent.parent
+        data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        patterns = data["tool"]["setuptools"]["package-data"]["media_organizer"]
+        self.assertIn("static/*.js", patterns)
+        self.assertTrue(STATIC.is_file())
 
 
 class ServerSetupTests(unittest.TestCase):
