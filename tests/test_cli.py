@@ -108,6 +108,31 @@ class RunTests(CliCase):
         self.assertEqual(code, 0)
         svc.return_value.run_forever.assert_called_once()
 
+    def test_run_starts_and_stops_web(self):
+        with mock.patch("media_organizer.cli.check_tools", return_value=[]), \
+                mock.patch("media_organizer.cli.Service") as svc, \
+                mock.patch("media_organizer.cli.serve_in_thread") as serve:
+            code, _ = self.run_cli("run")
+        self.assertEqual(code, 0)
+        serve.assert_called_once()
+        svc.return_value.run_forever.assert_called_once()
+        serve.return_value.shutdown.assert_called_once()
+        serve.return_value.server_close.assert_called_once()
+
+    def test_run_without_web_server_object(self):
+        with mock.patch("media_organizer.cli.check_tools", return_value=[]), \
+                mock.patch("media_organizer.cli.Service"), \
+                mock.patch("media_organizer.cli.serve_in_thread", return_value=None):
+            code, _ = self.run_cli("run")
+        self.assertEqual(code, 0)
+
+    def test_no_web_skips_server(self):
+        with mock.patch("media_organizer.cli.check_tools", return_value=[]), \
+                mock.patch("media_organizer.cli.Service"), \
+                mock.patch("media_organizer.cli.serve_in_thread") as serve:
+            self.run_cli("run", "--no-web")
+        serve.assert_not_called()
+
 
 class ImportLegacyTests(CliCase):
     def test_prints_counts(self):

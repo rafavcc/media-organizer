@@ -12,6 +12,7 @@ from .legacy import import_legacy
 from .locations import Location, MacUnreachable, build_locations
 from .probe import check_tools
 from .service import SCANS, Service
+from .web import serve_in_thread
 
 GIB = 1024 ** 3
 MIB = 1024 ** 2
@@ -149,8 +150,13 @@ def _run(cfg: Config, args) -> int:
     if missing:
         print("missing tools: " + ", ".join(missing))
         return 1
-    # web server is wired in Task 12 (args.no_web will skip it)
-    Service(cfg).run_forever()
+    server = None if args.no_web else serve_in_thread(cfg)
+    try:
+        Service(cfg).run_forever()
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
     return 0
 
 

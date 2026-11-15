@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Media Organizer</title>
+<style>
+:root {
+  --bg: #f6f7f9; --card: #ffffff; --text: #1b1f24; --muted: #5d6673; --line: #e2e5ea;
+  --accent: #2457d6; --track: #e4e8ee; --ok: #1a7f4b; --bad: #b3261e;
+  --c-d: #2457d6; --c-mega: #c2570c;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171c; --card: #1d2128; --text: #e7eaee; --muted: #9aa3b0; --line: #2d333c;
+    --accent: #6c9bff; --track: #2d333c; --ok: #4cc38a; --bad: #ff8a80;
+    --c-d: #6c9bff; --c-mega: #f0a35a;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px 16px; }
+h1 { font-size: 1.1rem; letter-spacing: .08em; text-transform: uppercase; margin: 0; }
+h2 { font-size: .8rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 36px 0 12px; font-weight: 600; }
+.status { color: var(--muted); font-size: .9rem; display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.status .warn { color: var(--bad); }
+.status .pill { color: var(--accent); font-weight: 600; }
+.tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 24px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 20px; }
+.card .label { color: var(--muted); font-size: .8rem; }
+.card .value { font-size: 1.7rem; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.card .sub { color: var(--muted); font-size: .85rem; margin-top: 2px; }
+.milestones { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 6px 16px; }
+.milestones li { color: var(--muted); }
+.milestones li.done { color: var(--text); }
+.milestones .mark { display: inline-block; width: 1.4em; color: var(--muted); }
+.milestones li.done .mark { color: var(--ok); }
+.bars { display: grid; gap: 14px; }
+.bar-row .head { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0 12px; font-size: .9rem; }
+.bar-row .head span:last-child { color: var(--muted); font-variant-numeric: tabular-nums; }
+.bar { height: 10px; background: var(--track); border-radius: 5px; overflow: hidden; margin-top: 4px; }
+.bar > div { height: 100%; background: var(--accent); border-radius: 5px; }
+.chart { padding: 12px; }
+.chart svg { width: 100%; height: auto; display: block; }
+.chart text { fill: var(--muted); font-size: 11px; font-family: inherit; }
+.chart .grid { stroke: var(--line); stroke-width: 1; }
+.legend { display: flex; gap: 16px; font-size: .85rem; color: var(--muted); margin: 0 0 8px 8px; }
+.legend i { display: inline-block; width: 18px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+.work p { margin: 0 0 8px; }
+.muted { color: var(--muted); }
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.cols h3 { font-size: .9rem; margin: 0 0 8px; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .88rem; }
+th, td { padding: 6px 10px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+td.name { white-space: normal; word-break: break-all; min-width: 160px; }
+th { color: var(--muted); font-weight: 600; font-size: .78rem; }
+th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+details summary { cursor: pointer; color: var(--accent); margin-top: 8px; }
+details ul { margin: 8px 0 0; padding-left: 18px; word-break: break-all; font-size: .88rem; }
+.empty { color: var(--muted); padding: 8px 0; }
+@media (max-width: 700px) {
+  main { padding: 16px; }
+  .tiles, .cols { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Media Organizer</h1>
+    <div class="status" id="status"></div>
+  </header>
+  <div class="tiles" id="tiles"></div>
+  <h2>Milestones</h2>
+  <ul class="milestones" id="milestones"></ul>
+  <h2>First pass</h2>
+  <div class="bars" id="firstpass"></div>
+  <h2>Storage freed, last 30 days</h2>
+  <div class="card chart" id="chart"></div>
+  <h2>Work</h2>
+  <div class="work" id="work"></div>
+  <h2>Biggest folders</h2>
+  <div class="cols" id="folders"></div>
+  <h2>Recent activity</h2>
+  <div class="scroll" id="recent"></div>
+  <h2>Problems</h2>
+  <div id="problems"></div>
+</main>
+<script>
+"use strict";
+var GIB = 1024 * 1024 * 1024, MIB = 1024 * 1024;
+var SVG_NS = "http:" + "//www.w3.org/2000/svg"; // split so the file holds no URL literal
+var lostConnection = false, last = null;
+
+function el(tag, cls, text, kids) {
+  var n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined && text !== null) n.textContent = text;
+  (kids || []).forEach(function (k) { n.appendChild(k); });
+  return n;
+}
+function svg(tag, attrs, text) {
+  var n = document.createElementNS(SVG_NS, tag);
+  Object.keys(attrs || {}).forEach(function (k) { n.setAttribute(k, attrs[k]); });
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+function fill(id, kids) {
+  var box = document.getElementById(id);
+  while (box.firstChild) box.removeChild(box.firstChild);
+  kids.forEach(function (k) { box.appendChild(k); });
+}
+function size(n) {
+  n = n || 0;
+  return n >= GIB ? (n / GIB).toFixed(1) + " GB" : (n / MIB).toFixed(1) + " MB";
+}
+function gb(n) { return (n / GIB).toFixed(1) + " GB"; }
+function count(n) { return (n || 0).toLocaleString(); }
+function when(ts) { return new Date(ts * 1000).toLocaleString(); }
+function pct(a, b) { return b > 0 ? Math.min(100, Math.round(100 * a / b)) : 0; }
+function bar(p) {
+  var fillEl = el("div");
+  fillEl.style.width = p + "%";
+  return el("div", "bar", null, [fillEl]);
+}
+function empty(text) { return el("div", "empty", text); }
+
+function renderStatus(s) {
+  var parts = [el("span", null, s.mac_reachable ? "Mac: reachable" : "Mac: away")];
+  if (s.paused) parts.push(el("span", "pill", "Paused"));
+  if (lostConnection) parts.push(el("span", "warn", "Connection lost — retrying"));
+  fill("status", parts);
+}
+
+function tile(label, value, sub) {
+  var kids = [el("div", "label", label), el("div", "value", value)];
+  if (sub) kids.push(el("div", "sub", sub));
+  return el("div", "card", null, kids);
+}
+function renderTiles(s) {
+  var d = s.disk, f = s.freed;
+  fill("tiles", [
+    tile("Storage freed", gb(f.total), "D: " + gb(f.d) + " · MEGA " + gb(f.mega)),
+    tile("D: free", gb(d.d_free), "of " + gb(d.d_total)),
+    tile("MEGA size now", gb(d.mega_bytes), "was " + gb(d.mega_bytes_start) + " at start")
+  ]);
+}
+
+function renderMilestones(s) {
+  fill("milestones", s.milestones.map(function (m) {
+    return el("li", m.done ? "done" : "", null, [
+      el("span", "mark", m.done ? "✔" : "○"), document.createTextNode(m.label)]);
+  }));
+}
+
+function etaText(fp) {
+  if (fp.total > 0 && fp.done >= fp.total) return "done";
+  if (fp.eta_days === null || fp.eta_days === undefined) return "no estimate yet";
+  if (fp.eta_days < 1) return "under a day left";
+  return "about " + (fp.eta_days < 10 ? fp.eta_days.toFixed(1) : Math.round(fp.eta_days)) + " days left";
+}
+function renderFirstPass(s) {
+  fill("firstpass", [["D: library", s.first_pass.d], ["MEGA", s.first_pass.mega]].map(function (r) {
+    var fp = r[1];
+    return el("div", "bar-row", null, [
+      el("div", "head", null, [el("span", null, r[0]),
+        el("span", null, count(fp.done) + " / " + count(fp.total) + " · " + etaText(fp))]),
+      bar(pct(fp.done, fp.total))]);
+  }));
+}
+
+function renderChart(s) {
+  var days = s.daily, W = 640, H = 240, L = 52, R = 14, T = 12, B = 30;
+  var series = [["d", "D: library", "var(--c-d)"], ["mega", "MEGA", "var(--c-mega)"]];
+  var cum = {}, max = 0;
+  series.forEach(function (sr) {
+    var run = 0;
+    cum[sr[0]] = days.map(function (day) { run += day[sr[0]]; return run; });
+    max = Math.max(max, run);
+  });
+  if (max <= 0) { fill("chart", [empty("No conversions yet")]); return; }
+  var x = function (i) { return L + (days.length > 1 ? i * (W - L - R) / (days.length - 1) : 0); };
+  var y = function (v) { return T + (H - T - B) * (1 - v / max); };
+  var root = svg("svg", {viewBox: "0 0 " + W + " " + H, role: "img",
+                         "aria-label": "Cumulative GB freed per day, last 30 days"});
+  [0, 0.5, 1].forEach(function (f) {
+    var v = max * f;
+    root.appendChild(svg("line", {x1: L, x2: W - R, y1: y(v), y2: y(v), "class": "grid"}));
+    root.appendChild(svg("text", {x: L - 8, y: y(v) + 4, "text-anchor": "end"}, (v / GIB).toFixed(1) + " GB"));
+  });
+  [0, Math.floor((days.length - 1) / 2), days.length - 1].forEach(function (i, k) {
+    root.appendChild(svg("text", {x: x(i), y: H - 8, "text-anchor": k === 0 ? "start" : k === 1 ? "middle" : "end"},
+                         days[i].date));
+  });
+  series.forEach(function (sr) {
+    var pts = cum[sr[0]].map(function (v, i) { return x(i).toFixed(1) + "," + y(v).toFixed(1); });
+    root.appendChild(svg("polyline", {points: pts.join(" "), fill: "none", stroke: sr[2],
+                                      "stroke-width": 2, "stroke-linejoin": "round"}));
+    cum[sr[0]].forEach(function (v, i) {
+      var dot = svg("circle", {cx: x(i), cy: y(v), r: 3, fill: sr[2]});
+      dot.appendChild(svg("title", {}, sr[1] + " " + days[i].date + ": " + (v / GIB).toFixed(1) + " GB total"));
+      root.appendChild(dot);
+    });
+  });
+  var legend = el("div", "legend", null, series.map(function (sr) {
+    var sw = el("i"); sw.style.background = sr[2];
+    return el("span", null, null, [sw, document.createTextNode(sr[1])]);
+  }));
+  fill("chart", [legend, root]);
+}
+
+function scanLine(sc) {
+  if (!sc.finished) return sc.name + " never";
+  return sc.name + " " + when(sc.finished) + (sc.ok ? " ok" : " " + (sc.message || "failed"));
+}
+function renderWork(s) {
+  var kids = [], n = s.now, q = s.queue;
+  if (n) {
+    var p = typeof n.progress === "number" ? Math.round(n.progress * 100) : null;
+    kids.push(el("p", null, "Now encoding " + (n.name || "?") + " (" + size(n.size) + ")" + (p === null ? "" : " " + p + "%")));
+    if (p !== null) kids.push(bar(p));
+  } else {
+    kids.push(el("p", null, "Now: idle"));
+  }
+  kids.push(el("p", "muted", "Queue: " + count(q.downloads) + " Downloads · " + count(q.intake) +
+               " inbox · " + count(q.mega) + " MEGA · " + count(q.library) + " library"));
+  kids.push(el("p", "muted", "Last scans: " + s.scans.map(scanLine).join(" · ")));
+  fill("work", kids);
+}
+
+function table(headers, rows) {
+  var head = el("tr", null, null, headers.map(function (h) { return el("th", h[1] ? "num" : "", h[0]); }));
+  var body = rows.map(function (r) {
+    return el("tr", null, null, r.map(function (cell, i) {
+      return el("td", headers[i][1] ? "num" : (headers[i][2] || ""), cell);
+    }));
+  });
+  return el("div", "scroll", null, [el("table", null, null, [el("thead", null, null, [head]), el("tbody", null, null, body)])]);
+}
+function folderTable(title, list) {
+  var kids = [el("h3", null, title)];
+  if (!list.length) kids.push(empty("No folders yet"));
+  else kids.push(table([["Folder", false, "name"], ["Size", true], ["Files", true], ["Compressed", true]],
+    list.map(function (f) { return [f.folder, size(f.bytes), count(f.files), pct(f.compressed_files, f.files) + "%"]; })));
+  return el("div", null, null, kids);
+}
+function renderFolders(s) {
+  fill("folders", [folderTable("D: library", s.folders.d), folderTable("MEGA", s.folders.mega)]);
+}
+
+function renderRecent(s) {
+  if (!s.recent.length) { fill("recent", [empty("No conversions yet")]); return; }
+  fill("recent", [table([["Time"], ["File", false, "name"], ["Before → after", true], ["Saved", true]],
+    s.recent.map(function (r) {
+      return [when(r.ts), r.relpath, size(r.bytes_before) + " → " + size(r.bytes_after),
+              size(r.bytes_before - r.bytes_after)];
+    }))]);
+}
+
+function renderProblems(s) {
+  var p = s.problems;
+  var kids = [el("p", null, count(p.error) + " errors · " + count(p["no-gain"]) + " no-gain · " +
+                 count(p["low-quality"]) + " low-quality · " + count(p.changed) + " changed")];
+  if (p.items.length) {
+    kids.push(el("details", null, null, [
+      el("summary", null, "Show " + p.items.length + " errors"),
+      el("ul", null, null, p.items.map(function (it) {
+        return el("li", null, it.location + " " + it.relpath + ": " + (it.error || it.reason || ""));
+      }))]));
+  }
+  fill("problems", kids);
+}
+
+function render(s) {
+  renderStatus(s); renderTiles(s); renderMilestones(s); renderFirstPass(s); renderChart(s);
+  renderWork(s); renderFolders(s); renderRecent(s); renderProblems(s);
+}
+
+function refresh() {
+  fetch("/api/summary", {cache: "no-store", credentials: "same-origin"})
+    .then(function (r) { if (!r.ok) throw new Error("status " + r.status); return r.json(); })
+    .then(function (s) { lostConnection = false; last = s; render(s); })
+    .catch(function () {
+      lostConnection = true;
+      if (last) renderStatus(last);
+      else fill("status", [el("span", "warn", "Connection lost — retrying")]);
+    });
+}
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>
