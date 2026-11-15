@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -44,31 +45,54 @@ def image_cmd(ext: str, src: Path, out: Path) -> list[str]:
 
 def run_video(src: Path, out: Path, info: VideoInfo, cfg: Config,
               on_progress: Callable[[float], None] | None = None) -> tuple[int, str]:
-    """Run the encode; returns (returncode, last few KB of stderr). Never leaves ffmpeg running."""
+    """Run the encode; returns (returncode, last few KB of stderr). Never leaves ffmpeg running.
+
+    If ffmpeg's reported out_time does not advance for `cfg.encode_stall_min` minutes it is
+    killed and the result is a failure whose message contains "encoder stalled"."""
     proc = subprocess.Popen(video_cmd(src, out, info, cfg), stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             errors="replace")
     tail: list[str] = [""]
+    stall_s = cfg.encode_stall_min * 60
+    last = {"value": None, "at": time.monotonic()}
+    stalled = threading.Event()
+    done = threading.Event()
 
     def drain() -> None:
         for chunk in iter(lambda: proc.stderr.read(1024), ""):
             tail[0] = (tail[0] + chunk)[-STDERR_TAIL:]
 
+    def watchdog() -> None:
+        while not done.wait(min(1.0, max(stall_s / 4, 0.05))):
+            if time.monotonic() - last["at"] > stall_s:
+                stalled.set()
+                proc.kill()
+                return
+
     reader = threading.Thread(target=drain, daemon=True)
     reader.start()
+    dog = threading.Thread(target=watchdog, daemon=True)
+    dog.start()
     try:
         for line in proc.stdout:
             key, _, value = line.strip().partition("=")
+            if key not in ("out_time_us", "out_time_ms"):
+                continue
+            if value != last["value"] and value not in ("N/A", ""):
+                last["value"], last["at"] = value, time.monotonic()
             if on_progress and key == "out_time_us" and info.duration > 0:
                 try:
-                    done = int(value) / 1e6 / info.duration
+                    done_frac = int(value) / 1e6 / info.duration
                 except ValueError:
                     continue
-                on_progress(min(1.0, max(0.0, done)))
+                on_progress(min(1.0, max(0.0, done_frac)))
         rc = proc.wait()
         reader.join(timeout=5)
+        if stalled.is_set():
+            return 1, f"encoder stalled: no progress for {cfg.encode_stall_min:g} min"
         return rc, tail[0]
     finally:
+        done.set()
         if proc.poll() is None:
             proc.kill()
             proc.wait()

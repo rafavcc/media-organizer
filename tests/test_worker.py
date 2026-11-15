@@ -1226,3 +1226,21 @@ class NameTakenBackoffTests(Base):
         self.assertGreaterEqual(nb, before + 59)
         self.assertLessEqual(nb, time.time() + 61)
         self.assertIsNone(db.claim_next(self.con, kind="video", exclude_locations=()))
+
+
+class StalledEncoderItemTests(Base):
+    def test_stalled_encode_ends_error_with_message(self):
+        make_video(self.d.root / "x.mp4", extra=["-b:v", "4M"])
+        item = self.add(self.d, "x.mp4")
+        bindir = self.tmp / "bin"
+        bindir.mkdir()
+        f = bindir / "ffmpeg"
+        f.write_text("#!/bin/sh\necho out_time_us=1000\nexec sleep 60\n")
+        f.chmod(0o755)
+        self.cfg = test_config(self.tmp, min_free_gb=0.001, encode_stall_min=0.03)
+        with mock.patch.dict(os.environ, {"PATH": f"{bindir}:{os.environ['PATH']}"}):
+            self.assertEqual(self.run_item(item), "error")
+        r = self.row(item)
+        self.assertEqual(r["status"], "error")
+        self.assertIn("encoder stalled", r["error"])
+        self.assertTrue((self.d.root / "x.mp4").exists())

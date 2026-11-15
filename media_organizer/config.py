@@ -32,6 +32,7 @@ class Config:
     crf: int = 30
     preset: str = "fast"
     x265_pools: int = 10
+    encode_stall_min: float = 30.0  # kill ffmpeg when its progress has not moved this long
     hevc_bloat_bpp: float = 0.07
     min_free_gb: float = 2.0
     web_port: int = 8765

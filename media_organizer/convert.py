@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,19 +74,21 @@ def _identify_cmd() -> list[str] | None:
 
 
 def _png_is_animated(src: Path) -> bool:
-    """True when an acTL chunk comes before the first IDAT (APNG)."""
+    """True when an acTL chunk comes before the first IDAT (APNG). Walks the chunk list,
+    seeking past each chunk's data, so ancillary chunks of any size are fine."""
     with open(src, "rb") as f:
-        head = f.read(65536)
-    pos = 8
-    while pos + 8 <= len(head):
-        length = int.from_bytes(head[pos:pos + 4], "big")
-        kind = head[pos + 4:pos + 8]
-        if kind == b"acTL":
-            return True
-        if kind == b"IDAT":
-            return False
-        pos += 12 + length
-    return False
+        f.seek(8)
+        while True:
+            head = f.read(8)
+            if len(head) < 8:
+                return False
+            length = int.from_bytes(head[:4], "big")
+            kind = head[4:8]
+            if kind == b"acTL":
+                return True
+            if kind == b"IDAT":
+                return False
+            f.seek(length + 4, os.SEEK_CUR)  # data and CRC
 
 
 def _multi_frame(src: Path, ext: str) -> Outcome | None:
@@ -99,8 +100,7 @@ def _multi_frame(src: Path, ext: str) -> Outcome | None:
     cmd = _identify_cmd()
     if cmd is None:
         return Outcome("error", "ImageMagick identify not found")
-    r = subprocess.run([*cmd, "-format", "%n\n", str(src.absolute())], capture_output=True,
-                       text=True)
+    r = probe.run_tool([*cmd, "-format", "%n\n", str(src.absolute())], probe.TOOL_TIMEOUT_S)
     try:
         frames = int(r.stdout.splitlines()[0])
     except (IndexError, ValueError):
@@ -123,13 +123,13 @@ def _convert_image(src: Path, ext: str, orig_size: int, work: Path, cfg: Config)
             if not im:
                 return Outcome("error", "ImageMagick not found")
             png = _temp(work, ".png")
-            r = subprocess.run([im, f"{src.absolute()}[0]", "-auto-orient", str(png)],
-                               capture_output=True, text=True)
+            r = probe.run_tool([im, f"{src.absolute()}[0]", "-auto-orient", str(png)],
+                               probe.TOOL_TIMEOUT_S)
             if r.returncode or not png.stat().st_size:
                 return Outcome("error", "ImageMagick conversion failed " + r.stderr.strip()[:100])
             encode_src = ref = png
 
-        r = subprocess.run(encode.image_cmd(ext, encode_src, tmp), capture_output=True, text=True)
+        r = probe.run_tool(encode.image_cmd(ext, encode_src, tmp), probe.TOOL_TIMEOUT_S)
         ok = r.returncode == 0 and tmp.stat().st_size > 0
         if ok and ext == ".gif":
             ok = probe.gif_frames(src) == probe.webp_frames(tmp)
@@ -162,8 +162,11 @@ def convert(src: Path, name: str, orig_size: int, work: Path, cfg: Config,
             on_progress: Callable[[float], None] | None = None) -> Outcome:
     """Convert src (whose original file name is `name`) inside `work`; verify before reporting ok."""
     kind = rules.kind_of(name)
-    if kind == "video":
-        return _convert_video(src, orig_size, work, cfg, on_progress)
-    if kind == "image":
-        return _convert_image(src, os.path.splitext(name)[1].lower(), orig_size, work, cfg)
+    try:
+        if kind == "video":
+            return _convert_video(src, orig_size, work, cfg, on_progress)
+        if kind == "image":
+            return _convert_image(src, os.path.splitext(name)[1].lower(), orig_size, work, cfg)
+    except probe.ToolTimeout as e:  # temp files are removed by the callees' finally blocks
+        return Outcome("error", str(e))
     return Outcome("error", f"unsupported file type: {name}")

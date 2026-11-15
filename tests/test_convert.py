@@ -1,5 +1,8 @@
+import os
 import subprocess
 import tempfile
+import time
+from unittest import mock
 import unittest
 from pathlib import Path
 
@@ -181,3 +184,107 @@ class ConvertTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StallAndTimeoutTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.work = self.tmp / "work"
+        self.work.mkdir()
+
+    def fake_ffmpeg(self, script):
+        bindir = self.tmp / "bin"
+        bindir.mkdir(exist_ok=True)
+        f = bindir / "ffmpeg"
+        f.write_text(script)
+        f.chmod(0o755)
+        patcher = mock.patch.dict(os.environ, {"PATH": f"{bindir}:{os.environ['PATH']}"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_config_default_and_example(self):
+        from media_organizer.config import Config
+        self.assertEqual(Config().encode_stall_min, 30)
+        example = Path(__file__).resolve().parents[1] / "deploy" / "config.example.toml"
+        self.assertIn("encode_stall_min", example.read_text())
+
+    def test_stalled_encoder_is_killed_and_reported(self):
+        src = make_video(self.tmp / "a.mp4", extra=["-b:v", "4M"])
+        self.fake_ffmpeg("#!/bin/sh\necho out_time_us=1000\nexec sleep 60\n")
+        cfg = test_config(self.tmp, encode_stall_min=0.03)  # about two seconds
+        started = time.monotonic()
+        res = convert(src, "a.mp4", src.stat().st_size, self.work, cfg)
+        self.assertLess(time.monotonic() - started, 20)
+        self.assertEqual(res.status, "error")
+        self.assertIn("encoder stalled", res.message)
+        self.assertEqual(list(self.work.iterdir()), [])
+
+    def test_progressing_encoder_is_not_killed(self):
+        src = make_video(self.tmp / "a.mp4", extra=["-b:v", "4M"])
+        cfg = test_config(self.tmp, encode_stall_min=0.05)
+        res = convert(src, "a.mp4", src.stat().st_size, self.work, cfg)
+        self.assertEqual(res.status, "ok", res.message)
+
+    def test_cwebp_timeout_is_an_error_outcome(self):
+        src = make_image(self.tmp / "a.png")
+        real = subprocess.run
+
+        def run(cmd, *a, **kw):
+            if cmd[0] == "cwebp":
+                self.assertIn("timeout", kw)
+                raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+            return real(cmd, *a, **kw)
+        with mock.patch("subprocess.run", run):
+            res = convert(src, "a.png", src.stat().st_size, self.work, test_config(self.tmp))
+        self.assertEqual(res.status, "error")
+        self.assertIn("cwebp", res.message)
+        self.assertEqual(list(self.work.iterdir()), [])
+
+    def test_ffprobe_and_ssim_timeouts_are_error_outcomes(self):
+        src = make_image(self.tmp / "a.png")
+        real = subprocess.run
+
+        def run_for(tool):
+            def run(cmd, *a, **kw):
+                if cmd[0] == tool:
+                    raise subprocess.TimeoutExpired(cmd, kw.get("timeout", 0))
+                return real(cmd, *a, **kw)
+            return run
+        for tool in ("ffprobe", "ffmpeg"):
+            with self.subTest(tool=tool), mock.patch("subprocess.run", run_for(tool)):
+                res = convert(src, "a.png", src.stat().st_size, self.work, test_config(self.tmp))
+                self.assertEqual(res.status, "error")
+                self.assertIn(tool, res.message)
+        vid = make_video(self.tmp / "v.mp4")
+        with mock.patch("subprocess.run", run_for("ffprobe")):
+            res = convert(vid, "v.mp4", vid.stat().st_size, self.work, test_config(self.tmp))
+        self.assertEqual((res.status, "ffprobe" in res.message), ("error", True))
+
+    def test_timeouts_are_set(self):
+        seen = {}
+        real = subprocess.run
+
+        def run(cmd, *a, **kw):
+            seen[cmd[0]] = kw.get("timeout")
+            return real(cmd, *a, **kw)
+        src = make_image(self.tmp / "a.png")
+        with mock.patch("subprocess.run", run):
+            convert(src, "a.png", src.stat().st_size, self.work, test_config(self.tmp))
+        self.assertEqual(seen["cwebp"], 1800)
+        self.assertEqual(seen["ffprobe"], 120)
+        self.assertEqual(seen["ffmpeg"], 1800)  # the SSIM run
+
+    def test_apng_actl_after_64k_of_ancillary_chunks_is_detected(self):
+        def chunk(kind, data):
+            return len(data).to_bytes(4, "big") + kind + data + b"\0\0\0\0"
+        png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", b"\0" * 13)
+               + chunk(b"tEXt", b"k\0" + b"x" * 70000) + chunk(b"acTL", b"\0" * 8)
+               + chunk(b"IDAT", b"\0" * 4))
+        p = self.tmp / "a.png"
+        p.write_bytes(png)
+        from media_organizer.convert import _png_is_animated
+        self.assertTrue(_png_is_animated(p))
+        p.write_bytes(png.replace(b"acTL", b"aaaa"))
+        self.assertFalse(_png_is_animated(p))

@@ -22,8 +22,24 @@ class VideoInfo:
     bitrate: int | None
 
 
-def _run(cmd: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True)
+PROBE_TIMEOUT_S = 120
+TOOL_TIMEOUT_S = 1800
+
+
+class ToolTimeout(Exception):
+    """An external tool ran past its time limit (and was killed)."""
+
+
+def run_tool(cmd: list[str], timeout: float) -> subprocess.CompletedProcess:
+    """subprocess.run with a time limit; a timeout raises ToolTimeout naming the tool."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise ToolTimeout(f"{Path(cmd[0]).name} timed out after {timeout / 60:g} min") from None
+
+
+def _run(cmd: list[str], timeout: float = PROBE_TIMEOUT_S) -> subprocess.CompletedProcess:
+    return run_tool(cmd, timeout)
 
 
 def imagemagick() -> str | None:
@@ -60,7 +76,7 @@ def webp_frames(p: Path) -> str:
 
 def ssim(ref: Path, other: Path) -> float | None:
     r = _run(["ffmpeg", "-hide_banner", "-i", str(ref.absolute()), "-i", str(other.absolute()),
-              "-lavfi", "ssim", "-f", "null", "-"])
+              "-lavfi", "ssim", "-f", "null", "-"], TOOL_TIMEOUT_S)
     m = re.search(r"SSIM.*?All:([\d.]+)", r.stderr)
     return float(m.group(1)) if m else None
 
