@@ -107,6 +107,22 @@ class SchedulerTests(Base):
         self.assertEqual(db.last_scan(self.con, "d-full")["message"], "found 1, queued 1")
         self.assertEqual(db.last_scan(self.con, "d-intake")["ok"], 1)
 
+    def test_downloads_scan_message_includes_nonzero_counts(self):
+        dl = self.cfg.win_downloads
+        dl.mkdir(exist_ok=True)
+        old = time.time() - 3600
+        nfo = dl / "a" / "x.nfo"
+        nfo.parent.mkdir()
+        nfo.write_bytes(b"x")
+        empty = dl / "e"
+        empty.mkdir()
+        for p in (nfo, empty):
+            os.utime(p, (old, old))
+        scan = next(s for s in SCANS if s.name == "win-downloads")
+        self.assertTrue(run_scan(self.con, scan, self.locs, self.cfg))
+        self.assertEqual(db.last_scan(self.con, "win-downloads")["message"],
+                         "found 0, queued 0, nfo 1, folders 2")  # min_age_min is 0 here
+
     def test_exception_in_scan_is_recorded_not_raised(self):
         scan = next(s for s in SCANS if s.name == "d-full")
         with mock.patch.object(service, "scan_library", side_effect=RuntimeError("boom")):

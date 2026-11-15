@@ -197,13 +197,14 @@ class DownloadsTests(ScannerCase):
         moved.unlink()  # free the temp space right away
         self.assertFalse(big.exists())
         rows = self.rows()
-        self.assertEqual([r["relpath"] for r in rows], ["pic.png", "pic.webp", "small.mp4"])
+        self.assertEqual([r["relpath"] for r in rows],
+                         ["pic.png", "pic.webp", "small.mp4", "sub/inner.png"])
         for r in rows:
             self.assertEqual((r["location"], r["dest_location"], r["dest_dir"], r["priority"],
                               r["source"]), ("win_dl", "mega", "TBC", 0, "downloads"))
         self.assertEqual(self.rows()[1]["kind"], "image")
-        self.assertTrue((self.cfg.win_downloads / "sub" / "inner.png").exists())
-        self.assertEqual((res.moved, res.queued), (1, 3))
+        self.assertEqual((res.moved, res.queued), (1, 4))
+        self.assertEqual(res.moved, 1)
 
     def test_compressed_name_left_alone(self):
         write(self.cfg.win_downloads / "foo_compressed.png")
@@ -381,3 +382,207 @@ class DryRunTests(ScannerCase):
         write(self.cfg.d_root / "_TO_CONVERT" / "big.mp4")
         res = scan_downloads(self.con, self.dl, self.locs(), self.cfg, dry_run=True)
         self.assertEqual(res.would_move, [("big.mp4", "d/_TO_CONVERT/big (1).mp4")])
+
+
+def _big(path: Path, size=400 * MIB + 1):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        f.truncate(size)
+    return age(path)
+
+
+class RecursiveSweepTests(ScannerCase):
+    def locs(self):
+        return {"d": self.d, "win_dl": self.dl}
+
+    def scan(self, cfg=None, **kw):
+        return scan_downloads(self.con, self.dl, self.locs(), cfg or self.cfg, **kw)
+
+    def test_nested_files_routed_like_top_level(self):
+        dl = self.cfg.win_downloads
+        _big(dl / "a" / "b" / "big.mp4")
+        write(dl / "a" / "small.mp4")
+        write(dl / "x" / "pic.png")
+        res = self.scan()
+        self.assertTrue((self.cfg.d_root / "_TO_CONVERT" / "big.mp4").exists())
+        self.assertFalse((dl / "a" / "b" / "big.mp4").exists())
+        rows = self.rows()
+        self.assertEqual([r["relpath"] for r in rows], ["a/small.mp4", "x/pic.png"])
+        self.assertTrue(all(r["dest_dir"] == "TBC" and r["priority"] == 0 for r in rows))
+        self.assertEqual((res.found, res.moved, res.queued), (3, 1, 2))
+
+    def test_collision_between_subfolders_gets_free_names(self):
+        dl = self.cfg.win_downloads
+        _big(dl / "a" / "big.mp4")
+        _big(dl / "b" / "big.mp4", 400 * MIB + 2)
+        res = self.scan()
+        self.assertEqual(res.moved, 2)
+        names = sorted(p.name for p in (self.cfg.d_root / "_TO_CONVERT").iterdir())
+        self.assertEqual(names, ["big (1).mp4", "big.mp4"])
+
+    def test_nested_rules_still_apply(self):
+        dl = self.cfg.win_downloads
+        write(dl / "a" / "foo_compressed.png")
+        write(dl / "a" / "young.png", mtime=time.time())
+        write(dl / "a" / "empty.png", data=b"")
+        write(dl / "a" / "x.mp4.part")
+        write(dl / "a" / ".dot.png")
+        write(dl / "a" / "doc.pdf")
+        self.scan()
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(len(list((dl / "a").iterdir())), 6)
+
+    def test_dot_folder_untouched(self):
+        dl = self.cfg.win_downloads
+        write(dl / ".hid" / "pic.png")
+        write(dl / ".hid" / "a.nfo")
+        (dl / ".hid" / "empty").mkdir()
+        age((dl / ".hid" / "empty"))
+        (dl / ".hid2").mkdir()
+        age(dl / ".hid2")
+        res = self.scan()
+        self.assertEqual(self.rows(), [])
+        self.assertTrue((dl / ".hid" / "a.nfo").exists())
+        self.assertTrue((dl / ".hid" / "empty").is_dir())
+        self.assertTrue((dl / ".hid2").is_dir())
+        self.assertEqual((res.nfo_deleted, res.dirs_removed), (0, 0))
+
+    def test_nfo_deleted_in_any_case_and_subfolder_only_when_old(self):
+        dl = self.cfg.win_downloads
+        write(dl / "a.nfo")
+        write(dl / "s" / "t" / "B.NFO")
+        write(dl / "s" / "c.Nfo")
+        write(dl / "young.nfo", mtime=time.time())
+        write(dl / "keep.txt")
+        write(dl / "nfo")
+        write(dl / "x.nfo.txt")
+        res = self.scan()
+        self.assertEqual(res.nfo_deleted, 3)
+        self.assertEqual(sorted(p.name for p in dl.rglob("*") if p.is_file()),
+                         ["keep.txt", "nfo", "x.nfo.txt", "young.nfo"])
+
+    def test_other_files_left_and_their_folder_kept(self):
+        dl = self.cfg.win_downloads
+        write(dl / "docs" / "sub" / "a.pdf")
+        write(dl / "docs" / "b.txt")
+        age(dl / "docs" / "sub")
+        age(dl / "docs")
+        res = self.scan()
+        self.assertEqual(res.dirs_removed, 0)
+        self.assertTrue((dl / "docs" / "sub" / "a.pdf").exists())
+
+    def test_empty_folders_removed_bottom_up(self):
+        dl = self.cfg.win_downloads
+        for rel in ("a/b/c", "a/d", "e"):
+            (dl / rel).mkdir(parents=True)
+        for rel in ("a/b/c", "a/b", "a/d", "a", "e"):
+            age(dl / rel)
+        res = self.scan()
+        self.assertEqual(res.dirs_removed, 5)
+        self.assertEqual(list(dl.iterdir()), [])
+        self.assertTrue(dl.is_dir())
+
+    def test_folder_emptied_by_nfo_is_left_for_the_next_sweep(self):
+        dl = self.cfg.win_downloads
+        write(dl / "a" / "b" / "x.nfo")
+        age(dl / "a" / "b")
+        age(dl / "a")
+        res = self.scan()
+        self.assertEqual((res.nfo_deleted, res.dirs_removed), (1, 0))  # mtime changed by delete
+        self.assertTrue((dl / "a" / "b").exists())
+
+    def test_junk_files_removed_with_folder(self):
+        dl = self.cfg.win_downloads
+        for n in (".DS_Store", "Thumbs.db", "DESKTOP.INI"):
+            write(dl / "j" / n)
+        write(dl / "k" / ".DS_Store")
+        write(dl / "k" / "real.txt")
+        for rel in ("j", "k"):
+            age(dl / rel)
+        res = self.scan()
+        self.assertEqual(res.dirs_removed, 1)
+        self.assertFalse((dl / "j").exists())
+        self.assertTrue((dl / "k" / ".DS_Store").exists())
+
+    def test_junk_in_young_folder_is_kept(self):
+        dl = self.cfg.win_downloads
+        write(dl / "j" / ".DS_Store")
+        (dl / "j").touch()  # folder mtime now
+        os.utime(dl / "j")
+        res = self.scan()
+        self.assertEqual(res.dirs_removed, 0)
+        self.assertTrue((dl / "j" / ".DS_Store").exists())
+
+    def test_young_folder_kept(self):
+        dl = self.cfg.win_downloads
+        (dl / "new").mkdir()
+        res = self.scan()
+        self.assertEqual(res.dirs_removed, 0)
+        self.assertTrue((dl / "new").is_dir())
+
+    def test_root_never_removed(self):
+        dl = self.cfg.win_downloads
+        age(dl)
+        self.scan()
+        self.assertTrue(dl.is_dir())
+
+    def test_dry_run_changes_nothing_and_lists(self):
+        dl = self.cfg.win_downloads
+        write(dl / "a" / "x.NFO")
+        (dl / "e" / "f").mkdir(parents=True)
+        age(dl / "e" / "f")
+        age(dl / "e")
+        write(dl / "j" / "Thumbs.db")
+        age(dl / "j")
+        res = self.scan(dry_run=True)
+        self.assertEqual(res.would_delete, ["a/x.NFO"])
+        self.assertEqual(sorted(res.would_remove), ["e/f", "j"])
+        self.assertTrue((dl / "a" / "x.NFO").exists())
+        self.assertTrue((dl / "e" / "f").is_dir())
+        self.assertTrue((dl / "j" / "Thumbs.db").exists())
+        self.assertEqual((res.nfo_deleted, res.dirs_removed), (0, 0))
+
+    def test_symlinks_are_not_followed(self):
+        dl = self.cfg.win_downloads
+        outside = self.root / "outside"
+        write(outside / "pic.png")
+        write(outside / "x.nfo")
+        age(outside)
+        write(dl / "real" / "pic2.png")
+        try:
+            os.symlink(outside, dl / "link")
+            os.symlink(dl, dl / "real" / "loop")
+            os.symlink(outside / "pic.png", dl / "real" / "pic_link.png")
+            os.symlink(outside / "x.nfo", dl / "real" / "n.nfo")
+        except OSError:
+            self.skipTest("symlinks unavailable")
+        res = self.scan()
+        self.assertEqual([r["relpath"] for r in self.rows()], ["real/pic2.png"])
+        self.assertTrue((outside / "pic.png").exists())
+        self.assertTrue((outside / "x.nfo").exists())
+        self.assertTrue(os.path.islink(dl / "real" / "n.nfo"))
+        self.assertTrue(os.path.islink(dl / "link"))
+        self.assertEqual((res.nfo_deleted, res.dirs_removed), (0, 0))
+
+    def test_symlink_only_folder_is_not_empty(self):
+        dl = self.cfg.win_downloads
+        (dl / "f").mkdir()
+        try:
+            os.symlink(self.root, dl / "f" / "l")
+        except OSError:
+            self.skipTest("symlinks unavailable")
+        age(dl / "f")
+        res = self.scan()
+        self.assertEqual(res.dirs_removed, 0)
+        self.assertTrue((dl / "f" / "l").is_symlink())
+
+    def test_mac_rmdir_failure_is_unreachable(self):
+        from tests.test_locations import mac_location
+        loc, _ = mac_location(self.root)
+        (loc.root / "e").mkdir()
+        age(loc.root / "e")
+        with mock.patch("media_organizer.locations.os.rmdir",
+                        side_effect=OSError(107, "not connected")):
+            with self.assertRaises(MacUnreachable):
+                scan_downloads(self.con, loc, {"d": self.d, "mac_dl": loc}, self.cfg)
+        self.assertTrue((loc.root / "e").is_dir())

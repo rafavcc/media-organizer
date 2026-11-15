@@ -81,16 +81,41 @@ class LocalLocation(Location):
                 if item.name.startswith("."):
                     continue
                 child = f"{rel}/{item.name}" if rel else item.name
-                try:
-                    if item.is_dir():
+                try:  # symlinks and junctions are never followed
+                    if item.is_dir(follow_symlinks=False):
                         if recursive:
                             subdirs.append((Path(item.path), child))
-                    elif item.is_file():
-                        st = item.stat()
+                    elif item.is_file(follow_symlinks=False):
+                        st = item.stat(follow_symlinks=False)
                         yield Entry(child, st.st_size, st.st_mtime)
                 except FileNotFoundError:
                     continue  # vanished while walking
             stack.extend(reversed(subdirs))
+
+    def walk_dirs(self, sub: str = "") -> Iterator[Entry]:
+        """Every real folder under `sub` (never the start folder, dot-folders or symlinks), children
+        before their parents; size is 0 and mtime is the folder's own, read before any removal."""
+        found: list[Entry] = []
+        stack = [(self.path(sub) if sub else self.root, sub)]
+        while stack:
+            folder, rel = stack.pop()
+            try:
+                with os.scandir(folder) as it:
+                    items = sorted(it, key=lambda e: e.name)
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            for item in items:
+                if item.name.startswith("."):
+                    continue
+                try:
+                    if not item.is_dir(follow_symlinks=False):
+                        continue
+                    child = f"{rel}/{item.name}" if rel else item.name
+                    found.append(Entry(child, 0, item.stat(follow_symlinks=False).st_mtime))
+                except FileNotFoundError:
+                    continue
+                stack.append((Path(item.path), child))
+        return iter(reversed(found))  # a parent is always listed before its children
 
     def stat(self, relpath: str) -> Entry | None:
         try:
@@ -162,6 +187,15 @@ class LocalLocation(Location):
 
     def delete(self, relpath: str) -> None:
         self.path(relpath).unlink()
+
+    def rmdir(self, relpath: str) -> None:
+        """Remove one empty folder (fails when anything is inside). Never the location root."""
+        if not relpath.strip("/"):
+            raise ValueError("refusing to remove the location root")
+        os.rmdir(self.path(relpath))
+
+    def is_symlink(self, relpath: str) -> bool:
+        return os.path.islink(self.path(relpath))
 
     def move_within(self, relpath: str, new_relpath: str) -> None:
         new = self.path(new_relpath)
@@ -313,7 +347,13 @@ class MacLocation(LocalLocation):
         # materialised so that errors surface here, inside the guard
         return iter(list(super().walk(sub, recursive)))
 
+    @_mac_guard
+    def walk_dirs(self, sub: str = "") -> Iterator[Entry]:
+        return iter(list(super().walk_dirs(sub)))
+
     stat = _mac_guard(LocalLocation.stat)
+    rmdir = _mac_guard(LocalLocation.rmdir)
+    is_symlink = _mac_guard(LocalLocation.is_symlink)
     list_names = _mac_guard(LocalLocation.list_names)
     exists = _mac_guard(LocalLocation.exists)
     delete = _mac_guard(LocalLocation.delete)

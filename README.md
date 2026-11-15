@@ -3,11 +3,13 @@
 A service that runs on the Windows 11 PC (inside Ubuntu in WSL2) and makes your photos and videos smaller. It has three rules:
 
 1. **Compress in place.** Every video and image in the D: library (`D:\7_XYZ`) and in the iCloud `MEGA` folder on the Mac is converted next to the original: videos to H.265 `.mp4`, images to `.webp`. The new file is named `<name>_compressed.<ext>`. Resolution is never lowered.
-2. **Downloads are swept.** Every 6 hours it takes the images and videos from the top level of the Windows Downloads folder and the Mac Downloads folder (not subfolders). A video bigger than 400 MB goes to `D:\7_XYZ\_TO_CONVERT`; every other video and all images go to `MEGA/TBC`, compressed on the way (`.webp` files are only moved there, never converted).
+2. **Downloads are swept.** Every 6 hours it takes the images and videos from the Windows Downloads folder and the Mac Downloads folder **and all their subfolders** (folders whose name starts with `.` are skipped, and links to other folders are never followed). A video bigger than 400 MB goes to `D:\7_XYZ\_TO_CONVERT`; every other video and all images go to `MEGA/TBC`, compressed on the way (`.webp` files are only moved there, never converted). Files land in the destination under their own name, without the subfolder; two files with the same name get `(1)`, `(2)`, ... (or a different `_compressed` name). The same sweep **deletes every `.nfo` file** it finds in Downloads and **deletes empty folders** there (details below).
 3. **Originals are deleted** once the new file is verified. There is no backup and no Recycle Bin. A file is only replaced when all of this is true:
    - the new file is at most 75% of the original size (otherwise nothing is gained and the original stays);
    - it has the same width and height, the same number of audio tracks and (video) the same length within 1 second; images must also look the same (similarity score at least 0.95);
    - the new file is in its final place with the right size, and the original has not been changed since the program read it.
+
+A converted file carries the time of its conversion as its modification date; an original that is only moved (a `.webp`, or a video or image that was not converted) keeps its own date.
 
 The recipes (quality settings and checks) are the same as in the old `app_compactor` tool. One dashboard page and a log show progress: see "Daily use".
 
@@ -85,7 +87,7 @@ The first full pass over the roughly 860 GB in D: takes **days to weeks**. That 
    media-organizer scan --dry-run
    ```
 
-   This changes nothing and writes nothing to the real database. It prints lines like `WOULD QUEUE d Some/Folder/clip.mp4 812.3 MB` and `WOULD MOVE win_dl big.mkv -> ...`, then one summary per place: `d: 1488 would queue, 0 would move`. The four places are `d` (D: library), `mega`, `win_dl` (Windows Downloads) and `mac_dl` (Mac Downloads). What to look for:
+   This changes nothing and writes nothing to the real database. It prints lines like `WOULD QUEUE d Some/Folder/clip.mp4 812.3 MB` and `WOULD MOVE win_dl big.mkv -> ...`, `WOULD DELETE win_dl Some/Folder/movie.nfo` (a `.nfo` file that would be deleted) and `WOULD REMOVE FOLDER win_dl Old/Empty` (a folder that is empty right now and would be removed), then one summary per place: `d: 1488 would queue, 0 would move, 0 .nfo, 0 folders`. The four places are `d` (D: library), `mega`, `win_dl` (Windows Downloads) and `mac_dl` (Mac Downloads). What to look for:
    - `d: 0 would queue` when you know D: is full of videos means D: is not mounted. Stop and fix that.
    - `SKIP mega (unreachable)` or `SKIP mac_dl (unreachable)` is what you see unless the Mac is already mounted: a dry run never mounts it. To preview MEGA, run `ssh mac true`, then mount it as the old README describes and run the dry run again:
 
@@ -95,7 +97,7 @@ The first full pass over the roughly 860 GB in D: takes **days to weeks**. That 
      ```
 
      (This is the same mount the service makes; the dry run only recognises a Mac mounted at exactly that place. The old README mounts it elsewhere, which does not help here.) Unmount afterwards with `fusermount -u ~/.local/share/media-organizer/mac`. Do not start the service for this: the service deletes originals.
-   - Names in `_compressed` and files in subfolders of Downloads must not appear.
+   - Names in `_compressed`, files in dot-folders (`.something`) and `.nfo` files that are less than 10 minutes old must not appear. Read the `WOULD DELETE` and `WOULD REMOVE FOLDER` lines carefully: the real service deletes exactly those.
 
 4. **Stop the old cron job** (`pipeline.py`) so two programs never work on `_TO_CONVERT` at once:
 
@@ -155,7 +157,7 @@ The first full pass over the roughly 860 GB in D: takes **days to weeks**. That 
 
    Must stay untouched: the rest of `MEGA` (everything outside `MEGA_TRIAL`), the Mac's real `Downloads` and everything on D: except `_trial`.
 
-   **Trial 4: one file through each Downloads route.** Put into `trial-downloads` (and the Mac's `Downloads/trial`) a video over 400 MB, a small video and an image; the big video must land in `_trial/_TO_CONVERT` and the others in the trial MEGA `TBC` folder. `~/media-organizer-trial4.toml`:
+   **Trial 4: one file through each Downloads route.** Put into `trial-downloads` (and the Mac's `Downloads/trial`) a video over 400 MB, a small video and an image, some of them inside subfolders; the big video must land in `_trial/_TO_CONVERT` and the others in the trial MEGA `TBC` folder. Also add a `.nfo` file, an empty subfolder and a `.pdf` inside another subfolder: after the sweep (and 10 minutes) the `.nfo` and the empty folder must be gone and the `.pdf` and its folder must still be there. `~/media-organizer-trial4.toml`:
 
    ```toml
    d_root = "/mnt/d/_trial"
@@ -222,11 +224,15 @@ Problems     3 errors · 222 no-gain · 7 low-quality · 1 changed · 2 multi-fr
 
 Other things you can do:
 
-- **Dashboard:** `http://localhost:8765` on the PC, `http://192.168.0.33:8765` from other devices. Read-only: space freed, D: free space, milestones, progress, a chart, the biggest folders, recent conversions and problems. It still works when the Mac is off (MEGA figures are from the last scan). Pause, resume and retry are only available on the command line.
+- **Dashboard:** `http://localhost:8765` on the PC, `http://192.168.0.33:8765` from other devices. Read-only: space freed, D: free space, milestones, progress, charts (space freed over time, conversions per day, the biggest folders on D: and in MEGA), recent conversions and problems. The charts use Chart.js, which the program serves itself (behind the same password), so the page needs no internet connection; if the chart library cannot load, the charts show "Charts unavailable" and the rest of the page works. It still works when the Mac is off (MEGA figures are from the last scan). Pause, resume and retry are only available on the command line.
 - **Log:** `~/.local/share/media-organizer/organizer.log` (rotated, 5 files of 5 MB). Follow it with `tail -f ~/.local/share/media-organizer/organizer.log`, or `journalctl --user -u media-organizer -f`.
 - **Service:** `systemctl --user stop|start|restart media-organizer`. Stop waits up to 60 seconds for the running encode to be put back cleanly.
-- **When things are scanned:** the intake folders (`D:\_TO_CONVERT`, `MEGA/TBC`) and both Downloads folders every 6 hours; both whole libraries once a week; Mac scans are retried every hour while the Mac is away.
+- **When things are scanned:** the intake folders (`D:\_TO_CONVERT`, `MEGA/TBC`) and both Downloads folders (with all their subfolders) every 6 hours; both whole libraries once a week; Mac scans are retried every hour while the Mac is away.
 - Files modified in the last 10 minutes, empty files, files starting with `.` and `.part`, `.crdownload`, `.download` files are ignored until they settle.
+- **Downloads cleanup.** Besides moving media, each Downloads sweep (Windows and Mac) deletes things it considers clutter. **This is permanent: no Recycle Bin.**
+  - Every file ending in `.nfo` (any capitals), in any subfolder, once it is at least 10 minutes old.
+  - Empty folders, deepest first. A folder counts as empty when it holds nothing, or only `.DS_Store`, `Thumbs.db` or `desktop.ini` (these three are deleted together with the folder). It is removed only when the folder itself was last changed at least 10 minutes ago. The Downloads folder itself, folders starting with `.` and anything inside them are never touched. A folder that contains anything else (for example a `.pdf` or `.zip`) is kept. A folder that becomes empty because its last file was just moved or deleted is removed by a later sweep, not the same one.
+  - Each deleted `.nfo` and removed folder is written to the log (`deleted ...`, `removed folder ...`). The database keeps the counts of the last sweep in the scan message, for example `found 12, queued 3, moved 1, nfo 2, folders 1` (counts that are 0 are left out); see it with `media-organizer status --json`.
 
 Files in `D:\7_XYZ\_TO_CONVERT` are, after conversion, moved to `_CONVERTED` and the sorter (`fileSortingv6.py`) is run on them, as the old `pipeline.py` did. Files delivered to `MEGA/TBC` stay there for you to sort by hand.
 
@@ -286,7 +292,7 @@ Each file the program knows has a status, and often a reason. Statuses appear in
 | `rejected` | `low-quality` | An image's similarity score was below 0.95 | Original kept; same |
 | `rejected` | `multi-frame` | An image with several pages or frames (multi-page TIFF, multi-image HEIC, animated PNG); only one frame would survive | Original kept; not retried unless the file changes |
 | `rejected` | `changed` | The original changed while it was being processed | The file is queued again if a later scan sees it changed; the new file is kept |
-| `error` | | Something failed (the message is in `status --errors`) | Fix the cause, then `media-organizer retry-errors` |
+| `error` | | Something failed (the message is in `status --errors`). This includes `encoder stalled: no progress for 30 min` (see `encode_stall_min`) and a conversion tool that ran past its time limit | Fix the cause, then `media-organizer retry-errors` |
 | `error` | `could not delete original: ...` | The new file is in place but the original could not be deleted five times (for example a read-only file); the new file is kept | Fix the cause, then `media-organizer retry-errors` finishes it. While it was trying, `status` shows it as `stuck` after an hour |
 
 ## When something goes wrong
@@ -302,7 +308,8 @@ Each file the program knows has a status, and often a reason. Statuses appear in
 
 ## What it will never do
 
-- It never goes into subfolders of Downloads: only files directly in the folder.
+- It never enters a folder whose name starts with `.` (in Downloads or in the libraries), and never follows a symbolic link or junction to another folder or file.
+- In Downloads the only things it deletes are: `.nfo` files, empty folders (with their `.DS_Store`, `Thumbs.db` or `desktop.ini`) and the originals it has moved or converted after checking them. It never deletes the Downloads folder itself, never deletes a folder that holds anything else, and removes folders only with a plain "remove empty folder" (never recursively). Any other file type in Downloads (`.pdf`, `.zip`, ...) is left alone.
 - It never touches a file whose name ends in `_compressed` (any capitals).
 - It never deletes an original that changed since it was read, or one whose replacement is missing or the wrong size.
 - It never lowers resolution, and never uses lossless WebP.
@@ -324,6 +331,10 @@ All settings are in `~/.config/media-organizer/config.toml`; `deploy/config.exam
 | `image_workers` | 4 | Images converted in parallel (videos always one at a time) |
 | `min_free_gb` | 2 | Free space to keep on the destination drive |
 | `mac_host` | `mac` | The ssh alias of the Mac |
+| `encode_stall_min` | 30 | Minutes without any encoding progress after which a video encode is considered stuck |
+| `min_age_min` | 10 | Minutes a file or folder must be unchanged before it is touched (applies to Downloads media, `.nfo` files and empty folders) |
+
+**Encoder watchdog.** While a video is being encoded, the program watches ffmpeg's progress. If it does not move for `encode_stall_min` minutes (counted from the start of the encode), ffmpeg is stopped, the file is marked `error` ("encoder stalled") with the original untouched, and the next file goes on. Image conversions, ffprobe and the other conversion tools also have time limits (2 minutes for probing, 30 minutes for the rest); a tool that runs past its limit is stopped and the file is marked `error` naming the tool. Use `media-organizer retry-errors` once the cause is fixed. For very slow machines or very long videos, raise `encode_stall_min`.
 
 Restart the service after a change: `systemctl --user restart media-organizer`. An unknown key makes the program refuse to start, with the key's name in the message. If you change the quality settings (`crf`, `min_gain_ratio`, `min_ssim`, `hevc_bloat_bpp`), previously rejected files are looked at again, and `import-legacy` skips the old verdicts.
 

@@ -198,12 +198,24 @@ class ScanTests(CliCase):
         with open(big, "wb") as f:
             f.truncate(400 * MIB + 1)
         os.utime(big, (old, old))
+        nfo = self.cfg.win_downloads / "sub" / "info.NFO"
+        nfo.parent.mkdir()
+        nfo.write_bytes(b"i")
+        os.utime(nfo, (old, old))
+        inner = self.cfg.win_downloads / "empty" / "inner"
+        inner.mkdir(parents=True)
+        for p in (inner, inner.parent):
+            os.utime(p, (old, old))
         code, out = self.run_cli("scan", "--dry-run")
         self.assertEqual(code, 0)
         self.assertIn("WOULD QUEUE d A/x.mp4 3.0 MB", out)
         self.assertIn("WOULD MOVE win_dl big.mp4 -> d/_TO_CONVERT/big.mp4", out)
         self.assertIn("d: 1 would queue, 0 would move", out)
-        self.assertIn("win_dl: 0 would queue, 1 would move", out)
+        self.assertIn("win_dl: 0 would queue, 1 would move, 1 .nfo, 1 folders", out)
+        self.assertIn("WOULD DELETE win_dl sub/info.NFO", out)
+        self.assertIn("WOULD REMOVE FOLDER win_dl empty/inner", out)
+        self.assertTrue((self.cfg.win_downloads / "sub" / "info.NFO").exists())
+        self.assertTrue((self.cfg.win_downloads / "empty" / "inner").exists())
         self.assertIn("SKIP mega (unreachable)", out)
         self.assertIn("SKIP mac_dl (unreachable)", out)
         self.assertTrue(big.exists())

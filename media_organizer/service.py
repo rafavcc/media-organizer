@@ -96,7 +96,7 @@ def run_scan(con, scan: ScanDef, locs: dict[str, Location], cfg: Config,
             if res.suspect:
                 message = "suspect: empty listing"
             else:
-                ok, message = True, f"found {res.found}, queued {res.queued}"
+                ok, message = True, _scan_message(res)
             if loc.name == "d":
                 refresh_folders(con, locs["d"])
     except MacUnreachable:
@@ -113,6 +113,15 @@ def run_scan(con, scan: ScanDef, locs: dict[str, Location], cfg: Config,
         db.record_scan(con, name=scan.name.replace("-full", "-intake"), started=started,
                        finished=finished, ok=True, message=message)
     return ok
+
+
+def _scan_message(res) -> str:
+    message = f"found {res.found}, queued {res.queued}"
+    for label, count in (("moved", res.moved), ("nfo", res.nfo_deleted),
+                         ("folders", res.dirs_removed)):
+        if count:
+            message += f", {label} {count}"
+    return message
 
 
 def run_sorter(con, locs: dict[str, Location], cfg: Config) -> bool:

@@ -53,6 +53,41 @@ class LocalTests(unittest.TestCase):
                          ["sub/b.mp4", "sub/deep/c.mp4"])
         self.assertEqual(list(self.loc.walk("missing")), [])
 
+    def test_walk_never_follows_symlinks(self):
+        r = self.loc.root
+        (r / "real").mkdir(parents=True)
+        (r / "real" / "a.mp4").write_bytes(b"1")
+        os.symlink(r, r / "real" / "loop")
+        os.symlink(r / "real" / "a.mp4", r / "link.mp4")
+        os.symlink(r / "real", r / "dirlink")
+        self.assertEqual([e.relpath for e in self.loc.walk()], ["real/a.mp4"])
+        self.assertEqual([e.relpath for e in self.loc.walk_dirs()], ["real"])
+
+    def test_walk_dirs_bottom_up_skips_dot_dirs_and_root(self):
+        r = self.loc.root
+        for rel in ["a/b/c", "a/d", ".h/x", "e"]:
+            (r / rel).mkdir(parents=True)
+        rels = [e.relpath for e in self.loc.walk_dirs()]
+        self.assertEqual(sorted(rels), ["a", "a/b", "a/b/c", "a/d", "e"])
+        for rel in rels:
+            for other in rels:
+                if other.startswith(rel + "/"):
+                    self.assertLess(rels.index(other), rels.index(rel))
+        self.assertEqual(list(self.loc.walk_dirs("missing")), [])
+
+    def test_rmdir_only_empty_and_never_root(self):
+        r = self.loc.root
+        (r / "a").mkdir(parents=True)
+        (r / "b").mkdir()
+        (r / "b" / "f").write_bytes(b"1")
+        self.loc.rmdir("a")
+        self.assertFalse((r / "a").exists())
+        with self.assertRaises(OSError):
+            self.loc.rmdir("b")
+        with self.assertRaises(ValueError):
+            self.loc.rmdir("")
+        self.assertTrue((r / "b" / "f").exists())
+
     def test_publish(self):
         src = self.tmp / "src.bin"
         src.write_bytes(b"x" * 100)
@@ -227,7 +262,9 @@ class MacTests(unittest.TestCase):
         for call in (lambda: list(loc.walk()), lambda: loc.stat("f.mp4"),
                      lambda: loc.exists("f.mp4"), lambda: loc.free_bytes(),
                      lambda: loc.publish(src, "new/out.mp4", None, 0),
-                     lambda: loc.delete("f.mp4"), lambda: loc.move_within("f.mp4", "g.mp4"),
+                     lambda: loc.delete("f.mp4"), lambda: loc.rmdir("sub"),
+                     lambda: list(loc.walk_dirs()), lambda: loc.is_symlink("f.mp4"),
+                     lambda: loc.move_within("f.mp4", "g.mp4"),
                      lambda: loc.fetch("f.mp4", self.tmp / "d.mp4")):
             with self.assertRaises(MacUnreachable):
                 call()

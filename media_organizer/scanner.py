@@ -1,15 +1,18 @@
 """Scanners: list library files and queue work, sweep Downloads, refresh folder statistics."""
 from __future__ import annotations
 
+import logging
 import posixpath
 import time
 from dataclasses import dataclass, field
 
 from . import db, rules
 from .config import Config
-from .locations import PART_SUFFIX, Location, NoSpace
+from .locations import PART_SUFFIX, Location, MacUnreachable, NoSpace
 from .probe import probe_video
 
+JUNK_NAMES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
+log = logging.getLogger(__name__)
 PRIORITY = {"downloads": 0, "intake": 1, "mega": 2, "d": 3}
 STALE_PART_S = 24 * 3600
 GIB = 1024 ** 3
@@ -24,7 +27,11 @@ class ScanResult:
     moved: int = 0
     waiting: int = 0
     suspect: bool = False  # full scan walked nothing although rows exist: left untouched
+    nfo_deleted: int = 0
+    dirs_removed: int = 0
     would_move: list[tuple[str, str]] = field(default_factory=list)  # dry run only
+    would_delete: list[str] = field(default_factory=list)  # dry run only: .nfo files
+    would_remove: list[str] = field(default_factory=list)  # dry run only: empty folders
 
 
 def _intake_folder(loc: Location, cfg: Config) -> str | None:
@@ -120,8 +127,13 @@ def scan_downloads(con, loc: Location, locs: dict[str, Location], cfg: Config, *
     if not loc.root.exists():
         return res
     dest = locs["d"]
-    for entry in loc.walk(recursive=False):
-        route = rules.route_download(entry.relpath, entry.size, cfg)
+    for entry in loc.walk():
+        name = posixpath.basename(entry.relpath)
+        if name.lower().endswith(".nfo"):
+            if _old_enough(loc, entry, cfg):
+                _delete_nfo(loc, entry, res, dry_run)
+            continue
+        route = rules.route_download(name, entry.size, cfg)
         if route is None or entry.size == 0 or not _old_enough(loc, entry, cfg):
             continue
         res.found += 1
@@ -137,7 +149,46 @@ def scan_downloads(con, loc: Location, locs: dict[str, Location], cfg: Config, *
             res.known += 1
         else:
             res.queued += 1
+    _remove_empty_folders(loc, cfg, res, dry_run)
     return res
+
+
+def _delete_nfo(loc: Location, entry, res: ScanResult, dry_run: bool) -> None:
+    if dry_run:
+        res.would_delete.append(entry.relpath)
+        return
+    try:
+        loc.delete(entry.relpath)
+    except FileNotFoundError:
+        return
+    log.info("deleted %s %s", loc.name, entry.relpath)
+    res.nfo_deleted += 1
+
+
+def _remove_empty_folders(loc: Location, cfg: Config, res: ScanResult, dry_run: bool) -> None:
+    """Bottom-up, with rmdir only. Folder mtimes are read now, after the files were handled."""
+    for folder in loc.walk_dirs():
+        if not _old_enough(loc, folder, cfg):
+            continue
+        names = loc.list_names(folder.relpath)
+        junk = [n for n in names if n.lower() in JUNK_NAMES]
+        if len(junk) != len(names):
+            continue  # holds something else
+        if any(loc.is_symlink(f"{folder.relpath}/{n}") for n in junk):
+            continue
+        if dry_run:
+            res.would_remove.append(folder.relpath)
+            continue
+        try:
+            for n in junk:
+                loc.delete(f"{folder.relpath}/{n}")
+            loc.rmdir(folder.relpath)
+        except (FileNotFoundError, OSError) as e:
+            if isinstance(e, MacUnreachable):
+                raise
+            continue  # something appeared in it, or it is gone; the next sweep decides
+        log.info("removed folder %s %s", loc.name, folder.relpath)
+        res.dirs_removed += 1
 
 
 def _move_to_d(loc: Location, dest: Location, entry, cfg: Config, res: ScanResult,
@@ -145,7 +196,7 @@ def _move_to_d(loc: Location, dest: Location, entry, cfg: Config, res: ScanResul
     if not dest.reachable():
         res.waiting += 1
         return
-    name = rules.free_name(entry.relpath, lambda n: dest.exists(f"{cfg.d_intake}/{n}"))
+    name = rules.free_name(posixpath.basename(entry.relpath), lambda n: dest.exists(f"{cfg.d_intake}/{n}"))
     target = f"{cfg.d_intake}/{name}"
     if dry_run:
         res.would_move.append((entry.relpath, f"{dest.name}/{target}"))
