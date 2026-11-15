@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "media-organizer"
+version = "0.1.0"
+description = "Compresses media files in two libraries"
+requires-python = ">=3.11"
+
+[project.scripts]
+media-organizer = "media_organizer.cli:main"
+
+[tool.setuptools]
+packages = ["media_organizer"]
+
+[tool.setuptools.package-data]
+media_organizer = ["dashboard.html"]

@@ -1,0 +1,29 @@
+# media-organizer config. Copy to ~/.config/media-organizer/config.toml.
+# Every key is shown commented at its default.
+
+# d_root = "/mnt/d/7_XYZ"
+# d_intake = "_TO_CONVERT"
+# d_converted = "_CONVERTED"
+# win_downloads = "/mnt/c/Users/rafavcc/Downloads"
+# mac_host = "mac"
+# mac_mega = "Library/Mobile Documents/com~apple~CloudDocs/MEGA"
+# mac_downloads = "Downloads"
+# mega_intake = "TBC"
+# sorter = "/mnt/c/Users/rafavcc/iCloudDrive/Programming/Projects/fileSorting/fileSortingv6.py"
+# state_dir = "~/.local/share/media-organizer"
+# size_threshold_mb = 400
+# scan_interval_h = 6.0
+# full_scan_interval_h = 168.0
+# mac_retry_h = 1.0
+# min_age_min = 10
+# mac_delete_delay_s = 60
+# image_workers = 4
+# min_gain_ratio = 0.75
+# min_ssim = 0.95
+# crf = 30
+# preset = "fast"
+# x265_pools = 10
+# hevc_bloat_bpp = 0.07
+# min_free_gb = 2.0
+# web_port = 8765
+web_password = "change-me"
