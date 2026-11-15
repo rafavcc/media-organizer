@@ -1,0 +1,275 @@
+"""The service: scheduler (which scans are due), worker threads, sorter hand-off, main loop."""
+from __future__ import annotations
+
+import fcntl
+import json
+import logging
+import logging.handlers
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+from dataclasses import dataclass
+from typing import Callable
+
+from . import db, worker
+from .config import Config
+from .locations import Location, MacUnreachable, build_locations
+from .scanner import refresh_folders, scan_downloads, scan_library
+from .worker import finalize_published
+
+log = logging.getLogger(__name__)
+
+TICK_S = 30
+IDLE_S = 15
+MAC_CACHE_S = 60
+CURRENT_EVERY_S = 10
+JOIN_TIMEOUT_S = 20
+INTAKE_BLOCKING = ("queued", "running", "published")
+
+
+@dataclass(frozen=True)
+class ScanDef:
+    name: str
+    location: str
+    kind: str  # "intake" | "full" | "downloads"
+
+
+SCANS: tuple[ScanDef, ...] = (
+    ScanDef("d-intake", "d", "intake"),
+    ScanDef("d-full", "d", "full"),
+    ScanDef("mega-intake", "mega", "intake"),
+    ScanDef("mega-full", "mega", "full"),
+    ScanDef("win-downloads", "win_dl", "downloads"),
+    ScanDef("mac-downloads", "mac_dl", "downloads"),
+)
+
+
+class Stopping(BaseException):
+    """Raised from the progress callback to abort the running encode on shutdown.
+
+    A BaseException so that process_item's `except Exception` does not mark the item as failed.
+    """
+
+
+def due_scans(con, cfg: Config, now: float) -> list[ScanDef]:
+    due = []
+    for scan in SCANS:
+        last = db.last_scan(con, scan.name)
+        if last is None:
+            is_due = True
+        else:
+            hours = cfg.full_scan_interval_h if scan.kind == "full" else cfg.scan_interval_h
+            wait = hours if last["ok"] else cfg.mac_retry_h
+            is_due = now - last["finished"] >= wait * 3600
+        if is_due:
+            due.append(scan)
+    full_locations = {s.location for s in due if s.kind == "full"}
+    return [s for s in due if not (s.kind == "intake" and s.location in full_locations)]
+
+
+def run_scan(con, scan: ScanDef, locs: dict[str, Location], cfg: Config,
+             is_up: Callable[[Location], bool] | None = None) -> bool:
+    """Run one scan and record it. True when the scan completed."""
+    loc = locs[scan.location]
+    started = time.time()
+    ok, message = False, ""
+    try:
+        up = is_up(loc) if is_up else (not loc.is_mac or loc.reachable())
+        if not up:
+            message = "unreachable"
+        elif not loc.root.exists():
+            message = "root missing"
+        else:
+            if scan.kind == "downloads":
+                res = scan_downloads(con, loc, locs, cfg)
+            elif scan.kind == "intake":
+                sub = cfg.d_intake if loc.name == "d" else cfg.mega_intake
+                res = scan_library(con, loc, cfg, sub=sub, full=False)
+            else:
+                res = scan_library(con, loc, cfg, sub="", full=True)
+            if res.suspect:
+                message = "suspect: empty listing"
+            else:
+                ok, message = True, f"found {res.found}, queued {res.queued}"
+            if loc.name == "d":
+                refresh_folders(con, locs["d"])
+    except MacUnreachable:
+        message = "unreachable"
+    except Exception as e:
+        log.exception("scan %s failed", scan.name)
+        message = str(e) or type(e).__name__
+    finished = time.time()
+    db.record_scan(con, name=scan.name, started=started, finished=finished, ok=ok,
+                   message=message)
+    if ok and scan.kind == "full":
+        db.record_scan(con, name=scan.name.replace("-full", "-intake"), started=started,
+                       finished=finished, ok=True, message=message)
+    return ok
+
+
+def run_sorter(con, locs: dict[str, Location], cfg: Config) -> bool:
+    """Hand the converted intake files to the sorter once none are still in flight."""
+    if db.meta_get(con, "sorter_dirty") != "1":
+        return False
+    marks = ",".join("?" * len(INTAKE_BLOCKING))
+    busy = con.execute(f"SELECT 1 FROM items WHERE location='d' AND source='intake' "
+                       f"AND status IN ({marks}) LIMIT 1", INTAKE_BLOCKING).fetchone()
+    if busy:
+        return False
+    if not cfg.sorter.is_file():
+        log.error("sorter script missing: %s", cfg.sorter)
+        db.meta_set(con, "sorter_dirty", "0")
+        return False
+    cmd = [sys.executable, str(cfg.sorter), "--src", str(cfg.d_root / cfg.d_converted),
+           "--dst", str(cfg.d_root)]
+    log.info("$ %s", " ".join(cmd))
+    try:
+        rc = subprocess.run(cmd, cwd=cfg.sorter.parent).returncode
+    except OSError:
+        log.exception("could not run the sorter")
+        rc = -1
+    if rc != 0:
+        log.warning("sorter exited with %s", rc)
+    db.meta_set(con, "sorter_dirty", "0")
+    return rc == 0
+
+
+class Service:
+    def __init__(self, cfg: Config, locs: dict[str, Location] | None = None):
+        self.cfg = cfg
+        self.locs = build_locations(cfg) if locs is None else locs
+        self.con = db.open_db(cfg.db_path)
+        self.stop = threading.Event()
+        self.current: dict = {}
+        self._mac_lock = threading.Lock()
+        self._mac_ok = False
+        self._mac_at: float | None = None
+        self._current_at = 0.0
+
+    # -- Mac reachability: one shared cache, both Mac locations share one session --
+    def mac_up(self, now: float | None = None) -> bool:
+        now = time.time() if now is None else now
+        with self._mac_lock:
+            if self._mac_at is None or now - self._mac_at >= MAC_CACHE_S:
+                macs = [loc for loc in self.locs.values() if loc.is_mac]
+                self._set_mac(bool(macs) and macs[0].reachable(), now)
+            return self._mac_ok
+
+    def _set_mac(self, ok: bool, now: float) -> None:
+        self._mac_ok, self._mac_at = ok, now
+        db.meta_set(self.con, "mac_reachable", "1" if ok else "0")
+
+    def _mac_down(self) -> None:
+        with self._mac_lock:
+            self._set_mac(False, time.time())
+
+    # -- scheduling --
+    def tick(self) -> None:
+        up = lambda loc: not loc.is_mac or self.mac_up()
+        for scan in due_scans(self.con, self.cfg, time.time()):
+            if self.stop.is_set():
+                return
+            run_scan(self.con, scan, self.locs, self.cfg, up)
+        self.mac_up()
+        finalize_published(self.con, self.locs, self.cfg)
+        run_sorter(self.con, self.locs, self.cfg)
+
+    # -- working --
+    def _report(self, con, force: bool = False) -> None:
+        if not force and time.monotonic() - self._current_at < CURRENT_EVERY_S:
+            return
+        self._current_at = time.monotonic()
+        db.meta_set(con, "current", json.dumps(self.current))
+
+    def work_once(self, kind: str, con=None) -> str | None:
+        con = self.con if con is None else con
+        if self.stop.is_set() or db.meta_get(con, "paused") == "1":
+            return None
+        excluded = [] if self.mac_up() else [l.name for l in self.locs.values() if l.is_mac]
+        item = db.claim_next(con, kind=kind, exclude_locations=excluded)
+        if item is None:
+            return None
+        is_video = kind == "video"
+        if is_video:
+            self.current = {"name": item["relpath"].rsplit("/", 1)[-1], "size": item["size"],
+                            "progress": 0.0, "location": item["location"]}
+            self._report(con, force=True)
+
+        def on_progress(p: float) -> None:
+            if self.stop.is_set():
+                raise Stopping()
+            self.current["progress"] = round(p, 3)
+            self._report(con)
+
+        try:
+            return worker.process_item(con, item, self.locs, self.cfg, self.cfg.work_dir,
+                                       on_progress if is_video else None)
+        except MacUnreachable:
+            self._mac_down()
+            return "queued"
+        except Stopping:
+            db.set_status(con, item["id"], "queued")
+            return "queued"
+        finally:
+            if is_video:
+                self.current = {}
+                self._report(con, force=True)
+
+    def _worker_loop(self, kind: str) -> None:
+        con = db.open_db(self.cfg.db_path)
+        try:
+            while not self.stop.is_set():
+                try:
+                    result = self.work_once(kind, con)
+                except Exception:
+                    log.exception("%s worker failed", kind)
+                    result = None
+                if result in (None, "queued"):
+                    self.stop.wait(IDLE_S)
+        finally:
+            con.close()
+
+    # -- the long-running loop --
+    def run_forever(self) -> None:
+        cfg = self.cfg
+        cfg.state_dir.mkdir(parents=True, exist_ok=True)
+        lock = open(cfg.state_dir / "lock", "w")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit("media-organizer is already running (lock held)")
+        _setup_logging(cfg)
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, lambda *_: self.stop.set())
+        db.reset_running(self.con)
+        shutil.rmtree(cfg.work_dir, ignore_errors=True)
+        cfg.work_dir.mkdir(parents=True)
+        threads = [threading.Thread(target=self._worker_loop, args=(k,), name=f"{k}-{i}")
+                   for i, k in enumerate(["video"] + ["image"] * cfg.image_workers)]
+        for t in threads:
+            t.start()
+        log.info("started")
+        while not self.stop.is_set():
+            try:
+                self.tick()
+            except Exception:
+                log.exception("tick failed")
+            self.stop.wait(TICK_S)
+        log.info("stopping")
+        for t in threads:
+            t.join(timeout=JOIN_TIMEOUT_S)
+        log.info("stopped")
+
+
+def _setup_logging(cfg: Config) -> None:
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    for handler in (logging.handlers.RotatingFileHandler(cfg.log_path, maxBytes=5_000_000,
+                                                         backupCount=5),
+                    logging.StreamHandler()):
+        handler.setFormatter(fmt)
+        root.addHandler(handler)
