@@ -215,7 +215,7 @@ function unavailable(id) {
   msg.hidden = false;
 }
 
-function axisStyle(t, axis) {
+function axisStyle(t) {
   return {stacked: false, grid: {color: t.grid}, border: {color: t.grid}, ticks: {color: t.text}};
 }
 function baseOptions(t, extra) {
@@ -258,41 +258,61 @@ function folderData(list, key, t) {
   };
 }
 
-function makeChart(id, config) {
-  var canvas = document.getElementById(id).querySelector("canvas");
-  charts[id] = new window.Chart(canvas, config);
-}
+var CHART_IDS = ["chart-cum", "chart-daily", "chart-folders-d", "chart-folders-mega"];
 function gbTicks(o, axis) { o.scales[axis].ticks.callback = function (v) { return gbLabel(v); }; }
 function dateTicks(o) { o.scales.x.ticks.maxTicksLimit = 6; o.scales.x.ticks.maxRotation = 0; }
 
-function renderCharts(s) {
-  var ids = ["chart-cum", "chart-daily", "chart-folders-d", "chart-folders-mega"];
-  if (chartsMissing()) { ids.forEach(unavailable); return; }
-  try { drawCharts(s, ids); } catch (err) { ids.forEach(unavailable); }
+function chartData(id, s, t) {
+  if (id === "chart-cum") return dayData(s, true, t);
+  if (id === "chart-daily") return dayData(s, false, t);
+  return folderData(s.folders[id === "chart-folders-d" ? "d" : "mega"], id === "chart-folders-d" ? "d" : "mega", t);
 }
-function drawCharts(s, ids) {
-  var t = theme();
-  var data = {
-    "chart-cum": dayData(s, true, t), "chart-daily": dayData(s, false, t),
-    "chart-folders-d": folderData(s.folders.d, "d", t),
-    "chart-folders-mega": folderData(s.folders.mega, "mega", t)
-  };
-  if (!charts["chart-cum"]) {
-    makeChart("chart-cum", {type: "line", data: data["chart-cum"], options: baseOptions(t, function (o) {
-      gbTicks(o, "y"); dateTicks(o); }) });
-    makeChart("chart-daily", {type: "bar", data: data["chart-daily"], options: baseOptions(t, function (o) {
-      gbTicks(o, "y"); dateTicks(o); o.scales.x.stacked = true; o.scales.y.stacked = true; }) });
-    ["d", "mega"].forEach(function (key) {
-      makeChart("chart-folders-" + key, {type: "bar", data: data["chart-folders-" + key],
-        options: baseOptions(t, function (o) {
-          o.indexAxis = "y"; o.plugins.legend.display = false; gbTicks(o, "x");
-          o.scales.y.ticks.callback = function (v) { return shorten(this.getLabelForValue(v)); };
-          o.plugins.tooltip.callbacks.title = function (items) { return items.length ? items[0].label : ""; };
-        }) });
-    });
-  } else {
-    ids.forEach(function (id) { charts[id].data = data[id]; charts[id].update("none"); });
+function chartConfig(id, t, data) {
+  if (id === "chart-cum") {
+    return {type: "line", data: data, options: baseOptions(t, function (o) { gbTicks(o, "y"); dateTicks(o); })};
   }
+  if (id === "chart-daily") {
+    return {type: "bar", data: data, options: baseOptions(t, function (o) {
+      gbTicks(o, "y"); dateTicks(o); o.scales.x.stacked = true; o.scales.y.stacked = true; })};
+  }
+  return {type: "bar", data: data, options: baseOptions(t, function (o) {
+    o.indexAxis = "y"; o.plugins.legend.display = false; gbTicks(o, "x");
+    o.scales.y.ticks.callback = function (v) { return shorten(this.getLabelForValue(v)); };
+    o.plugins.tooltip.callbacks.title = function (items) { return items.length ? items[0].label : ""; };
+  })};
+}
+function dropChart(id) {
+  var c = charts[id];
+  delete charts[id];
+  try { if (c && c.destroy) c.destroy(); } catch (err) { /* already broken */ }
+}
+function noteNoData(s) {
+  var none = s.daily.every(function (d) { return !d.d && !d.mega; });
+  ["chart-cum", "chart-daily"].forEach(function (id) {
+    var msg = document.getElementById(id).querySelector(".empty");
+    msg.textContent = none ? "No conversions yet" : "";
+    msg.hidden = !none;
+  });
+}
+
+function renderCharts(s) {
+  if (chartsMissing()) { CHART_IDS.forEach(unavailable); return; }
+  var t = theme();
+  CHART_IDS.forEach(function (id) {
+    try {
+      var data = chartData(id, s, t);
+      if (!charts[id]) {
+        charts[id] = new window.Chart(document.getElementById(id).querySelector("canvas"),
+                                      chartConfig(id, t, data));
+      } else {
+        charts[id].data = data;
+        charts[id].update("none");
+      }
+    } catch (err) {
+      dropChart(id); // the next refresh builds it again
+    }
+  });
+  noteNoData(s);
 }
 
 function applyTheme() {
@@ -300,6 +320,7 @@ function applyTheme() {
   var t = theme();
   Object.keys(charts).forEach(function (id) {
     var c = charts[id], o = c.options;
+    try {
     o.plugins.legend.labels.color = t.text;
     ["x", "y"].forEach(function (a) {
       o.scales[a].ticks.color = t.text; o.scales[a].grid.color = t.grid; o.scales[a].border.color = t.grid;
@@ -309,6 +330,7 @@ function applyTheme() {
       ds.borderColor = ds.backgroundColor = t[keys[i]];
     });
     c.update("none");
+    } catch (err) { dropChart(id); }
   });
 }
 if (window.matchMedia) {

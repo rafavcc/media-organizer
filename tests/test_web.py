@@ -130,7 +130,7 @@ class StaticTests(WebCase):
         self.assertIn(b"Chart.js v4.4.1", body[:200])
 
     def test_no_other_static_paths(self):
-        for path in ("/static/", "/static", "/static/other.js", "/static/chart.umd.min.js/",
+        for path in ("/static/", "/static", "/static/other.js", "/static/chart.umd.min.js/", "//static/chart.umd.min.js",
                      "/static/chart.umd.min.js?x=1", "/static/../web.py", "/static/%2e%2e/web.py",
                      "/static/dashboard.html"):
             self.assertEqual(self.get(path, auth(PASSWORD))[0], 404, path)
@@ -167,6 +167,18 @@ class ServerSetupTests(unittest.TestCase):
         with self.assertLogs("media_organizer.web", logging.WARNING):
             self.assertIsNone(web.serve_in_thread(cfg))
 
+    def test_serve_in_thread_missing_chart_library(self):
+        from unittest import mock
+        cfg = replace(test_config(Path(self.tmp.name)), web_password=PASSWORD, web_port=0)
+        missing = Path(self.tmp.name) / "nope.js"
+        with mock.patch.object(web, "CHART_PATH", missing):
+            with self.assertLogs("media_organizer.web", logging.WARNING) as logs:
+                self.assertIsNone(web.serve_in_thread(cfg))
+        text = "\n".join(logs.output)
+        self.assertIn("chart library missing", text)
+        self.assertIn(str(missing), text)
+        self.assertNotIn("cannot bind", text)
+
     def test_serve_in_thread_port_in_use(self):
         cfg = replace(test_config(Path(self.tmp.name)), web_password=PASSWORD, web_port=0)
         first = web.make_server(cfg)
@@ -198,6 +210,21 @@ class HardeningTests(WebCase):
         start = time.time()
         self.assertEqual(sock.recv(10), b"")
         self.assertLess(time.time() - start, 8)
+
+    def test_idle_timeout_is_silent(self):
+        web._Handler.timeout = 1
+        self.addCleanup(setattr, web._Handler, "timeout", 15)
+        errors = []
+        self.server.handle_error = lambda request, client_address: errors.append(client_address)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            sock = socket.create_connection(("127.0.0.1", self.server.server_address[1]))
+            self.addCleanup(sock.close)
+            sock.settimeout(10)
+            self.assertEqual(sock.recv(10), b"")
+            time.sleep(0.5)
+        self.assertEqual(errors, [])
+        self.assertEqual(err.getvalue(), "")
 
     def test_handler_timeout_default(self):
         self.assertEqual(web._Handler.timeout, 15)

@@ -26,7 +26,8 @@ class _Handler(BaseHTTPRequestHandler):
     timeout = 15  # seconds; an idle client must not hold a thread forever
 
     def log_message(self, format, *args):  # never log headers, so never the password
-        log.info("web %s %r", self.address_string(), self.requestline.split(" HTTP")[0])
+        # requestline is not set yet when an idle client times out
+        log.info("web %s %r", self.address_string(), getattr(self, "requestline", "").split(" HTTP")[0])
 
     def _authorized(self) -> bool:
         header = self.headers.get("Authorization", "")
@@ -54,16 +55,22 @@ class _Handler(BaseHTTPRequestHandler):
     def _text(self, code: int, text: str, extra=()) -> None:
         self._send(code, text.encode(), "text/plain; charset=utf-8", extra)
 
+    def _target(self) -> str:
+        # http.server collapses a leading "//" in self.path; route on the raw target instead
+        parts = self.requestline.split()
+        return parts[1] if len(parts) >= 2 else self.path
+
     def do_GET(self):
+        target = self._target()
         if not self._authorized():
             self._text(401, "authentication required",
                        [("WWW-Authenticate", f'Basic realm="{REALM}"')])
-        elif self.path in ("/", "/index.html"):
+        elif target in ("/", "/index.html"):
             self._send(200, PAGE_PATH.read_bytes(), "text/html; charset=utf-8")
-        elif self.path == CHART_ROUTE:
+        elif target == CHART_ROUTE:
             self._send(200, self.server.chart_js, "application/javascript; charset=utf-8",
                        [("Cache-Control", "max-age=86400")])
-        elif self.path == "/api/summary":
+        elif target == "/api/summary":
             con = db.open_db(self.server.cfg.db_path)
             try:
                 body = json.dumps(stats.summary(con, self.server.cfg)).encode()
@@ -107,6 +114,9 @@ def serve_in_thread(cfg: Config) -> ThreadingHTTPServer | None:
         server = make_server(cfg)
     except ValueError as err:
         log.warning("dashboard disabled: %s", err)
+        return None
+    except FileNotFoundError as err:
+        log.warning("chart library missing: %s; dashboard disabled", err.filename or CHART_PATH)
         return None
     except OSError as err:
         log.warning("dashboard disabled: cannot bind port %s: %s", cfg.web_port, err)
