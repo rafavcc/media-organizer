@@ -188,7 +188,7 @@ class WorkTests(Base):
         self.assertIsNone(self.svc.work_once("image"))
         self.assertEqual(self.row("m.png", "mega")["status"], "queued")
         self.assertEqual(self.row("d.png")["status"], "done")
-        self.assertEqual(db.meta_get(self.con, "mac_reachable"), "0")
+        self.assertFalse(self.svc.mac_up())
 
     def test_mac_reachability_is_cached_for_a_minute(self):
         calls = []
@@ -235,6 +235,68 @@ class WorkTests(Base):
                                  "progress": 0.25, "location": "d"}])
         self.assertEqual(self.svc.current, {})
         self.assertEqual(json.loads(db.meta_get(self.con, "current")), {})
+
+
+class FixRound1Tests(Base):
+    def test_worker_never_touches_the_service_connection(self):
+        make_image(self.mega.root / "m.png")
+        self.queue(self.mega, "m.png", kind="image", source="library", priority=2)
+        other = db.open_db(self.cfg.db_path)
+        self.addCleanup(other.close)
+
+        class Forbidden:
+            def __getattr__(self, name):
+                raise AssertionError(f"service connection used: {name}")
+        self.svc.con = Forbidden()
+        self.assertIsNone(self.svc._mac_at)  # expired cache
+        self.assertEqual(self.svc.work_once("image", other), "published")
+
+    def test_tick_writes_mac_reachable_from_the_cache(self):
+        self.set_mac(False)
+        self.svc.tick()
+        self.assertEqual(db.meta_get(self.con, "mac_reachable"), "0")
+
+    def test_unexpected_exception_requeues_the_item(self):
+        make_video(self.d.root / "lib.mp4")
+        self.queue(self.d, "lib.mp4", source="library", priority=3)
+        with mock.patch.object(worker, "process_item", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                self.svc.work_once("video")
+        self.assertEqual(self.row("lib.mp4")["status"], "queued")
+
+    def test_unexpected_exception_leaves_a_finished_item_alone(self):
+        make_video(self.d.root / "lib.mp4")
+        self.queue(self.d, "lib.mp4", source="library", priority=3)
+
+        def fake(con, item, locs, cfg, work, on_progress=None):
+            db.set_status(con, item["id"], "error")
+            raise RuntimeError("late")
+        with mock.patch.object(worker, "process_item", side_effect=fake):
+            with self.assertRaises(RuntimeError):
+                self.svc.work_once("video")
+        self.assertEqual(self.row("lib.mp4")["status"], "error")
+
+    def test_mac_unreachable_during_scan_marks_mac_down_at_once(self):
+        self.mac_dl.reachable_flag = True
+        with mock.patch.object(service, "scan_downloads", side_effect=MacUnreachable("x")):
+            self.svc.tick()
+        self.mega.reachable = self.mac_dl.reachable = lambda: self.fail("reachable() called")
+        self.assertFalse(self.svc.mac_up())
+        self.assertEqual(db.meta_get(self.con, "mac_reachable"), "0")
+
+    def test_tick_finalizes_and_sorts_before_and_after_scans(self):
+        calls = []
+        scan = lambda *a, **k: calls.append("scan") or mock.Mock(suspect=False, found=0, queued=0)
+        with mock.patch.object(service, "finalize_published",
+                               side_effect=lambda *a: calls.append("finalize")), \
+                mock.patch.object(service, "run_sorter",
+                                  side_effect=lambda *a: calls.append("sorter")), \
+                mock.patch.object(service, "scan_library", side_effect=scan), \
+                mock.patch.object(service, "scan_downloads", side_effect=scan):
+            self.svc.tick()
+        self.assertEqual(calls[:3], ["finalize", "sorter", "scan"])
+        self.assertEqual(calls[-2:], ["finalize", "sorter"])
+        self.assertEqual(calls.count("scan"), 4)
 
 
 if __name__ == "__main__":

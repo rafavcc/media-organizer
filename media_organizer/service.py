@@ -71,8 +71,11 @@ def due_scans(con, cfg: Config, now: float) -> list[ScanDef]:
 
 
 def run_scan(con, scan: ScanDef, locs: dict[str, Location], cfg: Config,
-             is_up: Callable[[Location], bool] | None = None) -> bool:
-    """Run one scan and record it. True when the scan completed."""
+             is_up: Callable[[Location], bool] | None = None,
+             on_mac_down: Callable[[], None] | None = None) -> bool:
+    """Run one scan and record it. True when the scan completed.
+
+    on_mac_down is called when a Mac location turns out to be unreachable during the scan."""
     loc = locs[scan.location]
     started = time.time()
     ok, message = False, ""
@@ -98,6 +101,8 @@ def run_scan(con, scan: ScanDef, locs: dict[str, Location], cfg: Config,
                 refresh_folders(con, locs["d"])
     except MacUnreachable:
         message = "unreachable"
+        if on_mac_down is not None and loc.is_mac:
+            on_mac_down()
     except Exception as e:
         log.exception("scan %s failed", scan.name)
         message = str(e) or type(e).__name__
@@ -149,33 +154,33 @@ class Service:
         self._mac_at: float | None = None
         self._current_at = 0.0
 
-    # -- Mac reachability: one shared cache, both Mac locations share one session --
+    # -- Mac reachability: one shared in-memory cache (no database access, worker threads
+    #    call this); tick() persists it. Both Mac locations share one session --
     def mac_up(self, now: float | None = None) -> bool:
         now = time.time() if now is None else now
         with self._mac_lock:
             if self._mac_at is None or now - self._mac_at >= MAC_CACHE_S:
                 macs = [loc for loc in self.locs.values() if loc.is_mac]
-                self._set_mac(bool(macs) and macs[0].reachable(), now)
+                self._mac_ok, self._mac_at = bool(macs) and macs[0].reachable(), now
             return self._mac_ok
-
-    def _set_mac(self, ok: bool, now: float) -> None:
-        self._mac_ok, self._mac_at = ok, now
-        db.meta_set(self.con, "mac_reachable", "1" if ok else "0")
 
     def _mac_down(self) -> None:
         with self._mac_lock:
-            self._set_mac(False, time.time())
+            self._mac_ok, self._mac_at = False, time.time()
 
     # -- scheduling --
     def tick(self) -> None:
         up = lambda loc: not loc.is_mac or self.mac_up()
+        # Before the scans too, so a long scan does not delay deleting originals or the sorter.
+        finalize_published(self.con, self.locs, self.cfg)
+        run_sorter(self.con, self.locs, self.cfg)
         for scan in due_scans(self.con, self.cfg, time.time()):
             if self.stop.is_set():
                 return
-            run_scan(self.con, scan, self.locs, self.cfg, up)
-        self.mac_up()
+            run_scan(self.con, scan, self.locs, self.cfg, up, self._mac_down)
         finalize_published(self.con, self.locs, self.cfg)
         run_sorter(self.con, self.locs, self.cfg)
+        db.meta_set(self.con, "mac_reachable", "1" if self.mac_up() else "0")
 
     # -- working --
     def _report(self, con, force: bool = False) -> None:
@@ -213,10 +218,22 @@ class Service:
         except Stopping:
             db.set_status(con, item["id"], "queued")
             return "queued"
+        except Exception:
+            self._requeue_if_running(con, item["id"])
+            raise
         finally:
             if is_video:
                 self.current = {}
                 self._report(con, force=True)
+
+    @staticmethod
+    def _requeue_if_running(con, item_id: int) -> None:
+        try:
+            row = con.execute("SELECT status FROM items WHERE id=?", (item_id,)).fetchone()
+            if row is not None and row["status"] == "running":
+                db.set_status(con, item_id, "queued")
+        except Exception:
+            log.exception("could not requeue item %s", item_id)
 
     def _worker_loop(self, kind: str) -> None:
         con = db.open_db(self.cfg.db_path)
