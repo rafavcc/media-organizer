@@ -51,6 +51,7 @@ h2 { font-size: .8rem; letter-spacing: .06em; text-transform: uppercase; color: 
 .chart .empty { padding: 12px 8px; }
 .work p { margin: 0 0 8px; }
 .muted { color: var(--muted); }
+h2 .hint { text-transform: none; letter-spacing: 0; font-weight: 400; }
 .cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
 .tiles > *, .cols > div, .bars > * { min-width: 0; }
 .cols h3 { font-size: .9rem; margin: 0 0 8px; }
@@ -112,8 +113,10 @@ details ul { margin: 8px 0 0; padding-left: 18px; word-break: break-all; font-si
       <div id="folders-mega"></div>
     </div>
   </div>
-  <h2>Recent activity</h2>
+  <h2>Recent activity <span class="hint">(20 newest)</span></h2>
   <div class="scroll" id="recent"></div>
+  <h2>Biggest gains <span class="hint">(last 6 hours, top 20)</span></h2>
+  <div class="scroll" id="top-gain"></div>
   <h2>Problems</h2>
   <div id="problems"></div>
 </main>
@@ -382,13 +385,20 @@ function renderFolders(s) {
   fill("folders-mega", [folderTable(s.folders.mega)]);
 }
 
-function renderRecent(s) {
-  if (!s.recent.length) { fill("recent", [empty("No conversions yet")]); return; }
-  fill("recent", [table([["Time"], ["File", false, "name"], ["Before → after", true], ["Saved", true]],
-    s.recent.map(function (r) {
+function conversionTable(id, rows, none) {
+  if (!rows.length) { fill(id, [empty(none)]); return; }
+  fill(id, [table([["Time"], ["File", false, "name"], ["Before → after", true], ["Saved", true]],
+    rows.map(function (r) {
+      var saved = r.bytes_before - r.bytes_after;
+      var pct = r.bytes_before ? Math.round(saved * 100 / r.bytes_before) : 0;
       return [when(r.ts), r.relpath, size(r.bytes_before) + " → " + size(r.bytes_after),
-              size(r.bytes_before - r.bytes_after)];
+              size(saved) + " (" + pct + "%)"];
     }))]);
+}
+
+function renderRecent(s) {
+  conversionTable("recent", s.recent, "No conversions yet");
+  conversionTable("top-gain", s.top_gain || [], "No conversions in the last 6 hours");
 }
 
 function renderProblems(s) {

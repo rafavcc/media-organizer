@@ -11,7 +11,7 @@ from tests.helpers import test_config
 
 GB = 1024 ** 3
 KEYS = {"generated", "freed", "disk", "first_pass", "milestones", "daily", "now", "paused",
-        "queue", "scans", "mac_reachable", "folders", "recent", "problems"}
+        "queue", "scans", "mac_reachable", "folders", "recent", "top_gain", "problems"}
 
 
 def add_item(con, location, relpath, status, source="library", size=1000, error=None,
@@ -102,6 +102,21 @@ class StatsTest(unittest.TestCase):
         self.assertEqual([r["location"] for r in s["recent"]], ["mega", "d"])
         self.assertEqual(len(s["scans"]), 6)
         self.assertTrue(all(x["finished"] is None for x in s["scans"]))
+
+    def test_recent_is_20_newest_and_top_gain_is_last_6_hours_by_bytes_saved(self):
+        now = 1_800_000_000.0
+        for i in range(25):  # i GB saved, one per minute, newest = i 24
+            db.log_conversion(self.con, ts=now - (25 - i) * 60, location="d", relpath=f"f{i}.mp4",
+                              kind="video", bytes_before=(i + 2) * GB, bytes_after=2 * GB)
+        db.log_conversion(self.con, ts=now - 7 * 3600, location="d", relpath="old.mp4",
+                          kind="video", bytes_before=900 * GB, bytes_after=GB)
+        s = stats.summary(self.con, self.cfg, now=now)
+        self.assertEqual([r["relpath"] for r in s["recent"]],
+                         [f"f{i}.mp4" for i in range(24, 4, -1)])
+        top = [r["relpath"] for r in s["top_gain"]]
+        self.assertEqual(len(top), 20)
+        self.assertNotIn("old.mp4", top)  # biggest gain ever, but 7 hours old
+        self.assertEqual(top[:3], ["f24.mp4", "f23.mp4", "f22.mp4"])
 
     def test_meta_and_scans_and_queue(self):
         db.meta_set(self.con, "paused", "1")

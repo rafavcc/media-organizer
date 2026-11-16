@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from media_organizer import probe, rules
-from media_organizer.convert import convert
+from media_organizer.convert import convert, video_mismatch
 from media_organizer.encode import image_cmd, video_cmd
 from media_organizer.probe import VideoInfo, check_tools, gif_frames, probe_video, webp_frames, dims
 
@@ -40,6 +40,16 @@ class CommandTests(unittest.TestCase):
         cmd = video_cmd(Path("in.mp4"), Path("out.mp4"), fake_info(("pcm_s16le",)), cfg)
         self.assertTrue(contains_in_order(cmd, ["-c:a", "aac", "-b:a", "192k"]))
 
+    def test_encoder_defaults_are_crf27_slower(self):
+        from media_organizer.config import Config
+        self.assertEqual((Config().crf, Config().preset), (27, "slower"))
+        cmd = video_cmd(Path("in.mp4"), Path("out.mp4"), fake_info(("aac",)), Config())
+        self.assertTrue(contains_in_order(cmd, ["-preset", "slower", "-crf", "27"]))
+
+    def test_preset_change_counts_as_a_settings_change(self):
+        self.assertNotEqual(test_config(Path("/tmp"), preset="slow").settings,
+                            test_config(Path("/tmp"), preset="slower").settings)
+
     def test_image_cmd(self):
         out = Path("o.webp")
         jpg = image_cmd(".jpg", Path("a.jpg"), out)
@@ -53,6 +63,44 @@ class CommandTests(unittest.TestCase):
 
     def test_check_tools_lists_names(self):
         self.assertIsInstance(check_tools(), list)
+
+
+class OutputCheckTests(unittest.TestCase):
+    def out(self, **changes):
+        from dataclasses import replace
+        return replace(fake_info(("aac",)), **{"codec": "hevc", **changes})
+
+    def test_matching_output_passes(self):
+        self.assertIsNone(video_mismatch(fake_info(("aac",)), self.out()))
+        self.assertIsNone(video_mismatch(fake_info(("aac",)), self.out(fps_value=30.0001)))
+
+    def test_each_mismatch_is_named(self):
+        src = fake_info(("aac",))
+        for changes, word in (({"codec": "h264"}, "codec h264"),
+                              ({"width": 160}, "resolution"),
+                              ({"fps_value": 25.0}, "frame rate"),
+                              ({"fps_value": 29.97}, "frame rate"),
+                              ({"audio": 0}, "audio"),
+                              ({"duration": 4.0}, "duration")):
+            self.assertIn(word, video_mismatch(src, self.out(**changes)), changes)
+
+    def test_wrong_codec_fails_the_conversion_and_keeps_nothing(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        work = Path(tmp.name) / "work"
+        work.mkdir()
+        src = make_video(Path(tmp.name) / "a.mp4", extra=["-b:v", "4M"])
+        from dataclasses import replace
+
+        def h264_output(p):  # the source probes truly; the encoded file claims to be H.264
+            info = probe_video(p)
+            return info if info is None or p == src else replace(info, codec="h264")
+
+        with mock.patch("media_organizer.probe.probe_video", side_effect=h264_output):
+            res = convert(src, src.name, src.stat().st_size, work, test_config(Path(tmp.name)))
+        self.assertEqual(res.status, "error")
+        self.assertIn("codec h264", res.message)
+        self.assertEqual(list(work.iterdir()), [])
 
 
 class ConvertTests(unittest.TestCase):

@@ -22,8 +22,8 @@
 # image_workers = 4
 # min_gain_ratio = 0.75
 # min_ssim = 0.95
-# crf = 30
-# preset = "fast"
+# crf = 27          # lower = better quality, bigger files
+# preset = "slower" # slower = smaller files at the same quality, longer encodes
 # x265_pools = 10
 # encode_stall_min = 30
 # hevc_bloat_bpp = 0.07

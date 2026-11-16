@@ -13,7 +13,9 @@ from .service import SCANS
 DAILY_DAYS = 30
 ETA_WINDOW_DAYS = 3
 FOLDER_LIMIT = 15
-RECENT_LIMIT = 50
+RECENT_LIMIT = 20
+TOP_GAIN_LIMIT = 20
+TOP_GAIN_WINDOW_H = 6
 PROBLEM_ITEM_LIMIT = 100
 STUCK_PUBLISHED_S = 3600
 FINISHED = ("done", "skipped", "rejected", "error")
@@ -164,6 +166,10 @@ def summary(con, cfg: Config, now: float | None = None) -> dict:
     first_pass = {loc: _first_pass(con, loc, since) for loc in ("d", "mega")}
     recent = con.execute("SELECT ts, location, relpath, bytes_before, bytes_after "
                          "FROM conversions ORDER BY ts DESC, id DESC LIMIT ?", (RECENT_LIMIT,))
+    top_gain = con.execute(
+        "SELECT ts, location, relpath, bytes_before, bytes_after FROM conversions "
+        "WHERE ts >= ? ORDER BY bytes_before - bytes_after DESC, id DESC LIMIT ?",
+        (generated - TOP_GAIN_WINDOW_H * 3600, TOP_GAIN_LIMIT))
     return {
         "generated": generated,
         "freed": freed,
@@ -178,5 +184,6 @@ def summary(con, cfg: Config, now: float | None = None) -> dict:
         "mac_reachable": db.meta_get(con, "mac_reachable") == "1",
         "folders": {"d": _folders(con, "d"), "mega": _folders(con, "mega")},
         "recent": [dict(r) for r in recent],
+        "top_gain": [dict(r) for r in top_gain],
         "problems": _problems(con, generated),
     }

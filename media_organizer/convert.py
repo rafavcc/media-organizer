@@ -12,6 +12,7 @@ from . import encode, probe, rules
 from .config import Config
 
 MAX_DURATION_DRIFT_S = 1.0
+MAX_FPS_DRIFT = 0.0005  # relative: 29.970 vs 29.9700 passes; 29.97 vs 30 and 25 vs 30 fail
 VIA_IM_EXT = frozenset({".heic", ".heif", ".tif", ".tiff", ".bmp"})
 
 
@@ -46,10 +47,11 @@ def _convert_video(src: Path, orig_size: int, work: Path, cfg: Config,
     try:
         rc, err = encode.run_video(src, tmp, info, cfg, on_progress)
         out = probe.probe_video(tmp) if rc == 0 and tmp.stat().st_size else None
-        if (out is None or (out.width, out.height) != (info.width, info.height)
-                or out.audio != info.audio
-                or abs(out.duration - info.duration) > MAX_DURATION_DRIFT_S):
+        if out is None:
             return Outcome("error", _tail(err, "verification failed"))
+        problem = video_mismatch(info, out)
+        if problem:
+            return Outcome("error", f"verification failed: {problem}")
         new = tmp.stat().st_size
         if new > orig_size * cfg.min_gain_ratio:
             return Outcome("no-gain", f"{new}/{orig_size}")
@@ -58,6 +60,21 @@ def _convert_video(src: Path, orig_size: int, work: Path, cfg: Config,
     finally:
         if not keep:
             tmp.unlink(missing_ok=True)
+
+
+def video_mismatch(src: probe.VideoInfo, out: probe.VideoInfo) -> str | None:
+    """Why the encoded file does not match its source, or None when it does."""
+    if out.codec != "hevc":
+        return f"codec {out.codec}, expected hevc"
+    if (out.width, out.height) != (src.width, src.height):
+        return f"resolution {out.width}x{out.height}, expected {src.width}x{src.height}"
+    if src.fps_value > 0 and abs(out.fps_value - src.fps_value) > src.fps_value * MAX_FPS_DRIFT:
+        return f"frame rate {out.fps_value:.3f}, expected {src.fps_value:.3f}"
+    if out.audio != src.audio:
+        return f"{out.audio} audio tracks, expected {src.audio}"
+    if abs(out.duration - src.duration) > MAX_DURATION_DRIFT_S:
+        return f"duration {out.duration:.1f} s, expected {src.duration:.1f} s"
+    return None
 
 
 FRAME_COUNT_EXT = frozenset({".tif", ".tiff", ".heic", ".heif", ".bmp"})

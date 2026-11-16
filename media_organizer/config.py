@@ -32,8 +32,8 @@ class Config:
     image_workers: int = 4
     min_gain_ratio: float = 0.75
     min_ssim: float = 0.95
-    crf: int = 30
-    preset: str = "fast"
+    crf: int = 27
+    preset: str = "slower"
     x265_pools: int = 10
     encode_stall_min: float = 30.0  # kill ffmpeg when its progress has not moved this long
     hevc_bloat_bpp: float = 0.07
@@ -61,7 +61,7 @@ class Config:
     def settings(self) -> str:
         return (
             f"r{self.min_gain_ratio * 100:.0f}s{self.min_ssim * 100:.0f}"
-            f"c{self.crf}b{self.hevc_bloat_bpp * 1000:.0f}"
+            f"c{self.crf}{self.preset}b{self.hevc_bloat_bpp * 1000:.0f}"
         )
 
 

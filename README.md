@@ -6,12 +6,12 @@ A service that runs on the Windows 11 PC (inside Ubuntu in WSL2) and makes your 
 2. **Downloads are swept.** Every 6 hours it takes the images and videos from the Windows Downloads folder and the Mac Downloads folder **and all their subfolders** (folders whose name starts with `.` are skipped, and links to other folders are never followed). A video bigger than 400 MB goes to `D:\7_XYZ\_TO_CONVERT`; every other video and all images go to `MEGA/TBC`, compressed on the way (`.webp` files are only moved there, never converted). Files land in the destination under their own name, without the subfolder; two files with the same name get `(1)`, `(2)`, ... (or a different `_compressed` name). The same sweep **deletes every `.nfo` file** it finds in Downloads and **deletes empty folders** there (details below).
 3. **Originals are deleted** once the new file is verified. There is no backup and no Recycle Bin. A file is only replaced when all of this is true:
    - the new file is at most 75% of the original size (otherwise nothing is gained and the original stays);
-   - it has the same width and height, the same number of audio tracks and (video) the same length within 1 second; images must also look the same (similarity score at least 0.95);
+   - it has the same width and height, the same number of audio tracks and (video) the same length within 1 second, the same frame rate and the HEVC codec; images must also look the same (similarity score at least 0.95);
    - the new file is in its final place with the right size, and the original has not been changed since the program read it.
 
 A converted file carries the time of its conversion as its modification date; an original that is only moved (a `.webp`, or a video or image that was not converted) keeps its own date.
 
-The recipes (quality settings and checks) are the same as in the old `app_compactor` tool. One dashboard page and a log show progress: see "Daily use".
+The recipes started from the old `app_compactor` tool; videos now use CRF 27 with the `slower` preset (the old tool used CRF 30, `fast`). One dashboard page and a log show progress: see "Daily use".
 
 ## Contents
 
@@ -224,7 +224,7 @@ Problems     3 errors · 222 no-gain · 7 low-quality · 1 changed · 2 multi-fr
 
 Other things you can do:
 
-- **Dashboard:** `http://localhost:8002` on the PC, `http://192.168.0.33:8002` from other devices. Read-only: space freed, D: free space, milestones, progress, charts (space freed over time, conversions per day, the biggest folders on D: and in MEGA), recent conversions and problems. The charts use Chart.js, which the program serves itself (behind the same password), so the page needs no internet connection; if the chart library cannot load, the charts show "Charts unavailable" and the rest of the page works. It still works when the Mac is off (MEGA figures are from the last scan). Pause, resume and retry are only available on the command line.
+- **Dashboard:** `http://localhost:8002` on the PC, `http://192.168.0.33:8002` from other devices. Read-only: space freed, D: free space, milestones, progress, charts (space freed over time, conversions per day, the biggest folders on D: and in MEGA), the 20 newest conversions, the 20 biggest gains of the last 6 hours, and problems. The charts use Chart.js, which the program serves itself (behind the same password), so the page needs no internet connection; if the chart library cannot load, the charts show "Charts unavailable" and the rest of the page works. It still works when the Mac is off (MEGA figures are from the last scan). Pause, resume and retry are only available on the command line.
 - **Log:** `~/.local/share/media-organizer/organizer.log` (rotated, 5 files of 5 MB). Follow it with `tail -f ~/.local/share/media-organizer/organizer.log`, or `journalctl --user -u media-organizer -f`.
 - **Service:** `systemctl --user stop|start|restart media-organizer`. Stop waits up to 60 seconds for the running encode to be put back cleanly.
 - **When things are scanned:** the intake folders (`D:\_TO_CONVERT`, `MEGA/TBC`) and both Downloads folders (with all their subfolders) every 6 hours; both whole libraries once a week; Mac scans are retried every hour while the Mac is away.
@@ -333,6 +333,8 @@ All settings are in `~/.config/media-organizer/config.toml`; `deploy/config.exam
 | `image_workers` | 4 | Images converted in parallel (videos always one at a time) |
 | `min_free_gb` | 2 | Free space to keep on the destination drive |
 | `mac_host` | `mac` | The ssh alias of the Mac |
+| `crf` | 27 | Video quality: lower is better quality and bigger files (x265 CRF) |
+| `preset` | `slower` | x265 speed: slower gives smaller files at the same quality but takes longer (`medium`, `slow`, `slower`, `veryslow`) |
 | `encode_stall_min` | 30 | Minutes without any encoding progress after which a video encode is considered stuck |
 | `min_age_min` | 10 | Minutes a file or folder must be unchanged before it is touched (applies to library and intake files, Downloads media, `.nfo` files and empty folders) |
 
@@ -340,7 +342,7 @@ All settings are in `~/.config/media-organizer/config.toml`; `deploy/config.exam
 
 **Downloads paths are checked at start.** `win_downloads`, `d_root` and `state_dir` must be absolute paths (`~` is allowed; links are followed before the checks). The program refuses to start when `win_downloads` is `/`, a drive (`/mnt/c`), `/mnt/c/Users`, a user's home folder, or overlaps `d_root` or `state_dir`; or when `mac_downloads` is empty, `.`, `Desktop`, `Documents`, `Library` or inside `Library`, or overlaps `mac_mega`. The message names the key.
 
-Restart the service after a change: `systemctl --user restart media-organizer`. An unknown key makes the program refuse to start, with the key's name in the message. If you change the quality settings (`crf`, `min_gain_ratio`, `min_ssim`, `hevc_bloat_bpp`), previously rejected files are looked at again, and `import-legacy` skips the old verdicts.
+Restart the service after a change: `systemctl --user restart media-organizer`. An unknown key makes the program refuse to start, with the key's name in the message. If you change the quality settings (`crf`, `preset`, `min_gain_ratio`, `min_ssim`, `hevc_bloat_bpp`), previously rejected files are looked at again, and `import-legacy` skips the old verdicts.
 
 ## Status of this release
 
