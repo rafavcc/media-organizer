@@ -4,7 +4,8 @@ A service that runs on the Windows 11 PC (inside Ubuntu in WSL2) and makes your 
 
 1. **Compress in place.** Every video and image in the D: library (`D:\7_XYZ`) and in the iCloud `MEGA` folder on the Mac is converted next to the original: videos to H.265 `.mp4`, images to `.webp`. The new file is named `<name>_compressed.<ext>`. Resolution is never lowered.
 2. **Downloads are swept.** Every 6 hours it takes the images and videos from the Windows Downloads folder and the Mac Downloads folder **and all their subfolders** (folders whose name starts with `.` are skipped, and links to other folders are never followed). A video bigger than 400 MB goes to `D:\7_XYZ\_TO_CONVERT`; every other video and all images go to `MEGA/TBC`, compressed on the way (`.webp` files are only moved there, never converted). Files land in the destination under their own name, without the subfolder; two files with the same name get `(1)`, `(2)`, ... (or a different `_compressed` name). The same sweep **deletes every `.nfo` file** it finds in Downloads and **deletes empty folders** there (details below).
-3. **Originals are deleted** once the new file is verified. There is no backup and no Recycle Bin. A file is only replaced when all of this is true:
+3. **`_TO_CONVERT` is sorted by performer.** After conversion each file from `D:\7_XYZ\_TO_CONVERT` goes into `D:\7_XYZ\<performer>\`, matched by name against `performers.txt` (details under "Sorting by performer"). A file with no match waits in `_CONVERTED`.
+4. **Originals are deleted** once the new file is verified. There is no backup and no Recycle Bin. A file is only replaced when all of this is true:
    - the new file is at most 75% of the original size (otherwise nothing is gained and the original stays);
    - it has the same width and height, the same number of audio tracks and (video) the same length within 1 second, the same frame rate and the HEVC codec; images must also look the same (similarity score at least 0.95);
    - the new file is in its final place with the right size, and the original has not been changed since the program read it.
@@ -72,6 +73,8 @@ The first full pass over the roughly 860 GB in D: takes **days to weeks**. That 
    ```
 
    Change the line `web_password = "change-me"` to a password of your own. The dashboard refuses to start with an empty password. Every other line is commented out and shows its default; paths only need changing if yours differ. See "Settings".
+
+   Also make sure `performers.txt` (your list of performer names) is in the repository folder. It is kept out of git, so after a fresh clone copy it there, or `cp performers.example.txt performers.txt` and add names. Without it nothing is sorted (the log says so once).
 
 2. **Import what the old tool already rejected**, so the roughly 230 MEGA files it found not worth compressing are not tried again:
 
@@ -234,7 +237,15 @@ Other things you can do:
   - Empty folders, deepest first. A folder counts as empty when it holds nothing, or only `.DS_Store`, `Thumbs.db` or `desktop.ini` (these three are deleted together with the folder). It is removed only when the folder itself was last changed at least 10 minutes ago. The Downloads folder itself, folders starting with `.` and anything inside them are never touched. A folder that contains anything else (for example a `.pdf` or `.zip`) is kept. A folder that becomes empty because its last file was just moved or deleted is removed by a later sweep, not the same one.
   - Each deleted `.nfo` and removed folder is written to the log (`deleted ...`, `removed folder ...`). The database keeps the counts of the last sweep in the scan message, for example `found 12, queued 3, moved 1, nfo 2, folders 1` (counts that are 0 are left out); see it with `media-organizer status --json`.
 
-Files in `D:\7_XYZ\_TO_CONVERT` are, after conversion, moved to `_CONVERTED` and the sorter (`fileSortingv6.py`) is run on them, as the old `pipeline.py` did. Files delivered to `MEGA/TBC` stay there for you to sort by hand.
+Files in `D:\7_XYZ\_TO_CONVERT` are, after conversion, moved to `_CONVERTED` and straight away sorted into `D:\7_XYZ\<performer>\` (the logic of the old `fileSortingv6.py`, now built in). Files delivered to `MEGA/TBC` stay there for you to sort by hand.
+
+**Sorting by performer.** The names come from `performers.txt` in the repository folder (one name per line; setting `performers_file`). It is not stored in git: on a new machine copy your list there, or start from `performers.example.txt`.
+- A video matches when a performer's name appears in its file name as whole words, ignoring case and punctuation (`jane.doe-scene`, `Jane_Doe` and `JANE DOE` all match "Jane Doe"; "Ai" does not match inside "maid"). "Pmv Compilation" is checked first, then the names alphabetically; the first match wins.
+- If the performer folder already has a file with the same name, the new file replaces it.
+- A video with no match stays in `_CONVERTED`. Every 30 seconds the program re-checks `_CONVERTED` (sub-folders too), so after you add a name to `performers.txt` the waiting files move on their own; no restart is needed.
+- Only videos are sorted (`.mp4 .mkv .avi .wmv .m4v .mov .webm .icloud`); a file the program is still working on is left until it is finished.
+- On each change the program tidies `performers.txt` as the old sorter did: names in Title Case, duplicates removed, sorted, "Pmv Compilation" first.
+- `media-organizer scan --dry-run` lists the moves as `WOULD SORT` lines without making them.
 
 ## Opening the dashboard from other devices
 
@@ -286,7 +297,7 @@ Each file the program knows has a status, and often a reason. Statuses appear in
 | `running` | | Being converted right now | If the service stops, it goes back to `queued` |
 | `published` | | New file written and in place; waiting to delete the original (on the Mac it waits a few seconds, `mac_delete_delay_s`, default 5, before deleting) | Original deleted when its checks pass |
 | `done` | | Converted, original deleted | Never touched again |
-| `done` | `post-step-failed` | Converted, but moving it to `_CONVERTED` or running the sorter failed | Retried automatically; look in the log |
+| `done` | `post-step-failed` | Converted, but moving it to `_CONVERTED` failed | Retried automatically; look in the log |
 | `skipped` | `efficient` | A video already in AV1, or in H.265 at a bitrate that is already low | Left alone |
 | `rejected` | `no-gain` | The result was bigger than 75% of the original | Original kept; not retried unless the file or the settings change |
 | `rejected` | `low-quality` | An image's similarity score was below 0.95 | Original kept; same |
@@ -325,6 +336,7 @@ All settings are in `~/.config/media-organizer/config.toml`; `deploy/config.exam
 |---|---|---|
 | `web_password` | (none, required) | Dashboard password |
 | `web_port` | 8002 | Dashboard port |
+| `performers_file` | `performers.txt` in the repository folder | List of performer names used to sort `_TO_CONVERT` results |
 | `size_threshold_mb` | 400 | Downloads video size above which it goes to `_TO_CONVERT` |
 | `scan_interval_h` | 6 | Hours between scans of intake and Downloads |
 | `full_scan_interval_h` | 168 | Hours between whole-library scans |

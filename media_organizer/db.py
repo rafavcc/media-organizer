@@ -199,6 +199,12 @@ def retry_errors(con) -> int:
                            "finalize_fails=0, evict_pending=0 WHERE status='error'").rowcount
 
 
+def forget_path(con, location: str, relpath: str) -> None:
+    """Drop the row of a file that no longer exists at this path (it was replaced)."""
+    with _tx(con):
+        con.execute("DELETE FROM items WHERE location=? AND relpath=?", (location, relpath))
+
+
 def delete_item(con, item_id: int) -> None:
     with _tx(con):
         con.execute("DELETE FROM items WHERE id=?", (item_id,))

@@ -2,3 +2,6 @@ __pycache__/
 *.egg-info/
 .venv/
 .superpowers/
+
+# personal list of performer names (see performers.example.txt)
+/performers.txt

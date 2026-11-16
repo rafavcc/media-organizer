@@ -33,6 +33,6 @@ def make_gif(path: Path) -> Path:
 
 def test_config(tmp: Path, **overrides) -> Config:
     base = replace(Config(), d_root=tmp / "d", win_downloads=tmp / "downloads",
-                   state_dir=tmp / "state", sorter=tmp / "sorter.py", preset="fast", crf=30)  # tiny test clips need it to shrink 25%
+                   state_dir=tmp / "state", performers_file=tmp / "performers.txt", preset="fast", crf=30)  # tiny test clips need it to shrink 25%
     return replace(base, **overrides)
 test_config.__test__ = False  # not a test, despite the name

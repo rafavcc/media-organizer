@@ -1,4 +1,4 @@
-"""The service: scheduler (which scans are due), worker threads, sorter hand-off, main loop."""
+"""The service: scheduler (which scans are due), worker threads, sorting, main loop."""
 from __future__ import annotations
 
 import fcntl
@@ -7,8 +7,6 @@ import logging
 import logging.handlers
 import shutil
 import signal
-import subprocess
-import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -18,6 +16,7 @@ from . import db, worker
 from .config import Config
 from .locations import Location, MacUnreachable, build_locations
 from .scanner import refresh_folders, scan_downloads, scan_library
+from .sorter import sort_converted
 from .worker import finalize_published
 
 log = logging.getLogger(__name__)
@@ -28,7 +27,6 @@ IDLE_S = 15
 MAC_CACHE_S = 60
 CURRENT_EVERY_S = 10
 JOIN_TIMEOUT_S = 20
-INTAKE_BLOCKING = ("queued", "running", "published")
 
 
 @dataclass(frozen=True)
@@ -125,31 +123,16 @@ def _scan_message(res) -> str:
     return message
 
 
-def run_sorter(con, locs: dict[str, Location], cfg: Config) -> bool:
-    """Hand the converted intake files to the sorter once none are still in flight."""
-    if db.meta_get(con, "sorter_dirty") != "1":
-        return False
-    marks = ",".join("?" * len(INTAKE_BLOCKING))
-    busy = con.execute(f"SELECT 1 FROM items WHERE location='d' AND source='intake' "
-                       f"AND status IN ({marks}) LIMIT 1", INTAKE_BLOCKING).fetchone()
-    if busy:
-        return False
-    if not cfg.sorter.is_file():
-        log.error("sorter script missing: %s", cfg.sorter)
-        db.meta_set(con, "sorter_dirty", "0")
-        return False
-    cmd = [sys.executable, str(cfg.sorter), "--src", str(cfg.d_root / cfg.d_converted),
-           "--dst", str(cfg.d_root)]
-    log.info("$ %s", " ".join(cmd))
+def run_sorter(con, locs: dict[str, Location], cfg: Config) -> int:  # how many were sorted
+    """Sort whatever is waiting in _CONVERTED (left-overs, names added since). Never raises."""
+    loc = locs.get("d")
+    if loc is None:
+        return 0
     try:
-        rc = subprocess.run(cmd, cwd=cfg.sorter.parent).returncode
-    except OSError:
-        log.exception("could not run the sorter")
-        rc = -1
-    if rc != 0:
-        log.warning("sorter exited with %s", rc)
-    db.meta_set(con, "sorter_dirty", "0")
-    return rc == 0
+        return len(sort_converted(con, loc, cfg))
+    except Exception:
+        log.exception("sorting %s failed", cfg.d_converted)
+        return 0
 
 
 class Service:

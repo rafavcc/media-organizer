@@ -27,7 +27,7 @@ class CliCase(unittest.TestCase):
         self.conf = self.root / "config.toml"
         self.conf.write_text(
             f'd_root = "{self.cfg.d_root}"\nwin_downloads = "{self.cfg.win_downloads}"\n'
-            f'state_dir = "{self.cfg.state_dir}"\nsorter = "{self.cfg.sorter}"\n'
+            f'state_dir = "{self.cfg.state_dir}"\nperformers_file = "{self.cfg.performers_file}"\n'
             'mac_host = "nonexistent-test-host"\n')
 
     def run_cli(self, *args):

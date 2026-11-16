@@ -17,9 +17,7 @@ class Config:
     mac_mega: str = "Library/Mobile Documents/com~apple~CloudDocs/MEGA"  # relative to Mac home
     mac_downloads: str = "Downloads"  # relative to Mac home
     mega_intake: str = "TBC"
-    sorter: Path = Path(
-        "/mnt/c/Users/rafavcc/iCloudDrive/Programming/Projects/fileSorting/fileSortingv6.py"
-    )
+    performers_file: Path = Path(__file__).resolve().parent.parent / "performers.txt"
     state_dir: Path = Path.home() / ".local/share/media-organizer"
     size_threshold_mb: int = 400
     scan_interval_h: float = 6.0

@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from . import db, rules
+from . import db, rules, sorter
 from .config import Config
 from .convert import convert
 from .locations import Location, MacUnreachable, NoSpace
@@ -217,7 +217,7 @@ def _move_to_converted(con, item_id: int, loc: Location, cfg: Config) -> None:
         db.rename_item(con, item_id, new_rel)
         if row["reason"] == "post-step-failed":
             db.set_status(con, item_id, row["status"], reason=None)
-        db.meta_set(con, "sorter_dirty", "1")
+    sorter.sort_one(con, loc, cfg, new_rel)  # straight into the performer folder when it matches
 
 
 def _retry_post_steps(con, locs: dict[str, Location], cfg: Config) -> None:

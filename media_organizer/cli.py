@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from . import db, scanner, stats
+from . import db, scanner, sorter, stats
 from .config import DEFAULT_CONFIG_PATH, Config, load_config
 from .legacy import import_legacy
 from .locations import Location, MacUnreachable, build_locations
@@ -151,6 +151,11 @@ def _dry_run(cfg: Config) -> int:
                 print(f"WOULD QUEUE {name} {row['relpath']} {row['size'] / MIB:.1f} MB")
             for source, target in res.would_move:
                 print(f"WOULD MOVE {name} {source} -> {target}")
+            if name == "d":
+                if not cfg.performers_file.exists():
+                    print(f"SKIP sorting (performers file missing: {cfg.performers_file})")
+                for source, target in sorter.sort_converted(con, loc, cfg, dry_run=True):
+                    print(f"WOULD SORT {source} -> {target}")
             extra = ""
             if name in ("win_dl", "mac_dl"):
                 extra = f", {len(res.would_delete)} .nfo, {len(res.would_remove)} folders"

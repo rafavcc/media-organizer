@@ -14,7 +14,6 @@ from tests.helpers import make_image, make_video, test_config
 
 H = 3600.0
 T = 1_700_000_000.0
-STUB_SORTER = "import sys, pathlib\npathlib.Path(__file__).with_name('argv.txt').write_text(' '.join(sys.argv[1:]))\n"
 
 
 class FakeMac(LocalLocation):
@@ -211,11 +210,12 @@ class FolderChartTests(Base):
 
 class WorkTests(Base):
     def test_end_to_end(self):
-        self.cfg.sorter.write_text(STUB_SORTER)
+        self.cfg.performers_file.write_text("Alice Smith\n")
         (self.d.root / "A").mkdir()
         (self.d.root / "_TO_CONVERT").mkdir()
         make_video(self.d.root / "A" / "x.mp4")
-        make_video(self.d.root / "_TO_CONVERT" / "y.mp4")
+        make_video(self.d.root / "_TO_CONVERT" / "alice.smith.y.mp4")
+        make_video(self.d.root / "_TO_CONVERT" / "nobody.mp4")
         make_image(self.dl.root / "p.png")
         self.svc.tick()
         for kind in ("video", "image"):
@@ -223,40 +223,54 @@ class WorkTests(Base):
                 pass
         self.svc.tick()
         self.assertTrue((self.d.root / "A" / "x_compressed.mp4").exists())
-        self.assertTrue((self.d.root / "_CONVERTED" / "y_compressed.mp4").exists())
-        argv = (self.tmp / "argv.txt").read_text()
-        self.assertIn("--src", argv)
-        self.assertTrue(argv.split("--src ")[1].split(" --dst")[0].endswith("_CONVERTED"))
+        self.assertTrue((self.d.root / "Alice Smith" / "alice.smith.y_compressed.mp4").exists())
+        self.assertEqual(sorted(p.name for p in (self.d.root / "_CONVERTED").iterdir()),
+                         ["nobody_compressed.mp4"])  # no name match: waits in _CONVERTED
         self.assertTrue((self.mega.root / "TBC" / "p_compressed.webp").exists())
-        self.assertEqual(db.meta_get(self.con, "sorter_dirty"), "0")
 
-    def test_sorter_waits_for_intake_items(self):
-        self.cfg.sorter.write_text(STUB_SORTER)
-        make_video(self.d.root / "y.mp4")
-        self.queue(self.d, "y.mp4", source="intake", priority=1)
-        db.meta_set(self.con, "sorter_dirty", "1")
-        self.assertFalse(service.run_sorter(self.con, self.locs, self.cfg))
-        self.assertEqual(db.meta_get(self.con, "sorter_dirty"), "1")
-        self.assertFalse((self.tmp / "argv.txt").exists())
+    def converted(self, name, data=b"new"):
+        (self.d.root / "_CONVERTED").mkdir(exist_ok=True)
+        (self.d.root / "_CONVERTED" / name).write_bytes(data)
 
-    def test_sorter_ignores_errored_intake_rows_but_not_published(self):
-        self.cfg.sorter.write_text(STUB_SORTER)
-        make_video(self.d.root / "y.mp4")
-        self.queue(self.d, "y.mp4", source="intake", priority=1)
-        rid = self.row("y.mp4")["id"]
-        db.meta_set(self.con, "sorter_dirty", "1")
-        db.set_status(self.con, rid, "published", not_before=0)
-        self.assertFalse(service.run_sorter(self.con, self.locs, self.cfg))
-        self.assertFalse((self.tmp / "argv.txt").exists())
-        db.set_status(self.con, rid, "error", error="could not delete original: x")
-        self.assertTrue(service.run_sorter(self.con, self.locs, self.cfg))
-        self.assertTrue((self.tmp / "argv.txt").exists())
+    def test_sorter_picks_up_leftovers_once_the_name_is_added(self):
+        self.cfg.performers_file.write_text("Someone Else\n")
+        self.converted("Bob Jones - clip.mp4")
+        self.assertEqual(service.run_sorter(self.con, self.locs, self.cfg), 0)
+        self.cfg.performers_file.write_text("Someone Else\nbob jones\n")
+        os.utime(self.cfg.performers_file, (T, T))  # a new mtime even on coarse clocks
+        self.assertEqual(service.run_sorter(self.con, self.locs, self.cfg), 1)
+        self.assertTrue((self.d.root / "Bob Jones" / "Bob Jones - clip.mp4").exists())
+        self.assertEqual(self.cfg.performers_file.read_text(),
+                         "Pmv Compilation\nBob Jones\nSomeone Else\n")  # tidied as before
 
-    def test_missing_sorter_clears_flag(self):
-        db.meta_set(self.con, "sorter_dirty", "1")
-        with self.assertLogs("media_organizer.service", "ERROR"):
-            service.run_sorter(self.con, self.locs, self.cfg)
-        self.assertEqual(db.meta_get(self.con, "sorter_dirty"), "0")
+    def test_sorter_leaves_files_the_worker_may_still_touch(self):
+        self.cfg.performers_file.write_text("Bob Jones\n")
+        self.converted("bob jones.mp4")
+        self.queue(self.d, "_CONVERTED/bob jones.mp4", source="library", priority=3)
+        self.assertEqual(service.run_sorter(self.con, self.locs, self.cfg), 0)
+        rid = self.row("_CONVERTED/bob jones.mp4")["id"]
+        db.set_status(self.con, rid, "done")
+        self.assertEqual(service.run_sorter(self.con, self.locs, self.cfg), 1)
+        self.assertEqual(self.con.execute("SELECT relpath FROM items WHERE id=?",
+                                          (rid,)).fetchone()["relpath"], "Bob Jones/bob jones.mp4")
+
+    def test_newer_file_replaces_the_one_in_the_performer_folder(self):
+        self.cfg.performers_file.write_text("Bob Jones\n")
+        (self.d.root / "Bob Jones").mkdir()
+        (self.d.root / "Bob Jones" / "bob jones.mp4").write_bytes(b"a much bigger old file")
+        self.queue(self.d, "Bob Jones/bob jones.mp4", source="library", priority=3)
+        old = self.row("Bob Jones/bob jones.mp4")["id"]
+        db.set_status(self.con, old, "done")
+        self.converted("bob jones.mp4", b"new")
+        self.assertEqual(service.run_sorter(self.con, self.locs, self.cfg), 1)
+        self.assertEqual((self.d.root / "Bob Jones" / "bob jones.mp4").read_bytes(), b"new")
+        self.assertFalse((self.d.root / "_CONVERTED" / "bob jones.mp4").exists())
+        self.assertIsNone(self.con.execute("SELECT 1 FROM items WHERE id=?", (old,)).fetchone())
+
+    def test_missing_performers_file_sorts_nothing(self):
+        self.converted("bob jones.mp4")
+        self.assertEqual(service.run_sorter(self.con, self.locs, self.cfg), 0)
+        self.assertTrue((self.d.root / "_CONVERTED" / "bob jones.mp4").exists())
 
     def test_downloads_video_goes_first(self):
         make_video(self.d.root / "lib.mp4")

@@ -9,7 +9,7 @@
 # mac_mega = "Library/Mobile Documents/com~apple~CloudDocs/MEGA"
 # mac_downloads = "Downloads"
 # mega_intake = "TBC"
-# sorter = "/mnt/c/Users/rafavcc/iCloudDrive/Programming/Projects/fileSorting/fileSortingv6.py"
+# performers_file = "<repo folder>/performers.txt"  # one performer name per line
 # state_dir = "~/.local/share/media-organizer"
 # size_threshold_mb = 400
 # scan_interval_h = 6.0

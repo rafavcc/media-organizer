@@ -649,8 +649,17 @@ class IntakeTests(Base):
         self.assertEqual(self.run_item(item), "done")
         self.assertTrue((self.d.root / "_CONVERTED" / "v_compressed.mp4").exists())
         self.assertEqual(list((self.d.root / "_TO_CONVERT").iterdir()), [])
-        self.assertEqual(db.meta_get(self.con, "sorter_dirty"), "1")
         self.assertEqual(self.row(item)["relpath"], "_CONVERTED/v_compressed.mp4")
+
+    def test_intake_video_sorted_straight_into_the_performer_folder(self):
+        self.cfg.performers_file.write_text("Jane Doe\n")
+        (self.d.root / "_TO_CONVERT").mkdir()
+        make_video(self.d.root / "_TO_CONVERT" / "Jane_Doe-scene.mp4")
+        item = self.add(self.d, "_TO_CONVERT/Jane_Doe-scene.mp4", source="intake")
+        self.assertEqual(self.run_item(item), "done")
+        self.assertTrue((self.d.root / "Jane Doe" / "Jane_Doe-scene_compressed.mp4").exists())
+        self.assertEqual(list((self.d.root / "_CONVERTED").iterdir()), [])
+        self.assertEqual(self.row(item)["relpath"], "Jane Doe/Jane_Doe-scene_compressed.mp4")
 
     def test_intake_rejected_original_moved(self):
         self.cfg = test_config(self.tmp, min_free_gb=0.001, min_gain_ratio=0.01)
@@ -662,7 +671,6 @@ class IntakeTests(Base):
         self.assertEqual(self.run_item(item), "rejected")
         self.assertTrue((self.d.root / "_CONVERTED" / "v (1).mp4").exists())
         self.assertEqual(self.row(item)["relpath"], "_CONVERTED/v (1).mp4")
-        self.assertEqual(db.meta_get(self.con, "sorter_dirty"), "1")
 
 
 class DownloadsTests(Base):
@@ -1010,13 +1018,11 @@ class RecoveryTests(Base):
         r = self.row(item)
         self.assertEqual((r["status"], r["reason"]), ("done", "post-step-failed"))
         self.assertTrue((self.d.root / "_TO_CONVERT" / "v_compressed.mp4").exists())
-        self.assertIsNone(db.meta_get(self.con, "sorter_dirty"))
         worker.finalize_published(self.con, self.locs, self.cfg)
         self.assertTrue((self.d.root / "_CONVERTED" / "v_compressed.mp4").exists())
         self.assertEqual(list((self.d.root / "_TO_CONVERT").iterdir()), [])
         r = self.row(item)
         self.assertEqual((r["status"], r["relpath"]), ("done", "_CONVERTED/v_compressed.mp4"))
-        self.assertEqual(db.meta_get(self.con, "sorter_dirty"), "1")
         self.assertEqual(len(calls), 2)
 
 
