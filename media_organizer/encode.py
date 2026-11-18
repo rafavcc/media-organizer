@@ -59,8 +59,11 @@ def run_video(src: Path, out: Path, info: VideoInfo, cfg: Config,
     done = threading.Event()
 
     def drain() -> None:
-        for chunk in iter(lambda: proc.stderr.read(1024), ""):
-            tail[0] = (tail[0] + chunk)[-STDERR_TAIL:]
+        try:
+            for chunk in iter(lambda: proc.stderr.read(1024), ""):
+                tail[0] = (tail[0] + chunk)[-STDERR_TAIL:]
+        except (ValueError, OSError):
+            pass  # the pipe was closed under us (shutdown): nothing more to read
 
     def watchdog() -> None:
         while not done.wait(min(1.0, max(stall_s / 4, 0.05))):
@@ -96,5 +99,6 @@ def run_video(src: Path, out: Path, info: VideoInfo, cfg: Config,
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+        reader.join(timeout=5)  # let it reach end-of-file before the pipe is closed
         proc.stdout.close()
         proc.stderr.close()

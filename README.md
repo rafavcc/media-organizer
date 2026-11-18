@@ -62,7 +62,7 @@ Wherever this README says `media-organizer ...`, run it **from the repository fo
 
 ## First run, step by step
 
-The first full pass over the roughly 860 GB in D: takes **days to weeks**. That is normal. The PC stays usable: the service is capped at 60% of the CPU and runs at the lowest priority.
+The first full pass over the roughly 860 GB in D: takes **days to weeks**. That is normal. The PC stays usable: the service is capped at 50% of the CPU and runs at the lowest priority.
 
 1. **Create the settings file and set the password.**
 
@@ -369,7 +369,7 @@ Play the results on the iPhone and the Mac. The real service is enabled only aft
 
 **Assumptions the trials must verify** (none of these could be checked without the real machines):
 
-- **CPU cap.** Run `systemctl --user show media-organizer -p CPUQuotaPerSecUSec` and watch Task Manager during an encode: the service should stay near 60% of the CPU. A user unit in WSL may not be able to apply the cap.
+- **CPU cap.** Run `systemctl --user show media-organizer -p CPUQuotaPerSecUSec` and watch Task Manager during an encode: the service should stay near 50% of the CPU. A user unit in WSL may not be able to apply the cap.
 - **Online-only detection.** On the Mac, `/usr/bin/stat -f %f <an online-only file>` must have bit `0x40000000` set (`stat -f %f` prints decimal; check with a known online-only file and a downloaded one). Use `/usr/bin/stat` because another `stat` earlier in the path would behave differently.
 - **`brctl download` and `brctl evict` while a file is still uploading.** An evict of a file that iCloud has not finished uploading may be refused; the program retries the evict every tick for 7 days (`status` shows `to release on the Mac`) but the real behaviour is unknown.
 - **The Mac sleeping in the middle of a copy.** What the sshfs mount returns then (an error that looks like a broken disk, or a hang) is unknown; the program turns such errors into "Mac away" only when a quick `ssh true` fails too.

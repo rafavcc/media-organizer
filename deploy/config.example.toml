@@ -24,7 +24,7 @@
 # min_ssim = 0.95
 # crf = 27          # lower = better quality, bigger files
 # preset = "slower" # slower = smaller files at the same quality, longer encodes
-# x265_pools = 10
+# x265_pools = 8
 # encode_stall_min = 30
 # hevc_bloat_bpp = 0.07
 # min_free_gb = 2.0

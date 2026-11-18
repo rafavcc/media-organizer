@@ -32,7 +32,7 @@ class Config:
     min_ssim: float = 0.95
     crf: int = 27
     preset: str = "slower"
-    x265_pools: int = 10
+    x265_pools: int = 8
     encode_stall_min: float = 30.0  # kill ffmpeg when its progress has not moved this long
     hevc_bloat_bpp: float = 0.07
     min_free_gb: float = 2.0

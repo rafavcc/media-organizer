@@ -6,7 +6,7 @@ Type=simple
 WorkingDirectory=/mnt/c/Users/rafavcc/iCloudDrive/Programming/Projects/media_organizer
 ExecStart=/usr/bin/python3 -m media_organizer.cli run
 Environment=PYTHONUNBUFFERED=1
-CPUQuota=960%
+CPUQuota=800%
 Nice=19
 IOSchedulingClass=idle
 Restart=on-failure

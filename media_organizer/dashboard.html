@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Media Organizer</title>
+<meta name="description" content="Compression and sorting progress for the D: and MEGA media libraries">
+<meta name="theme-color" content="#2457d6">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http%3A//www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232457d6'/%3E%3Cpath d='M24 16v32l24-16z' fill='%23fff'/%3E%3Cpath d='M10 22h8M10 32h10M10 42h8' stroke='%23c9d8ff' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
 :root {
   --bg: #f6f7f9; --card: #ffffff; --text: #1b1f24; --muted: #5d6673; --line: #e2e5ea;
@@ -23,8 +26,18 @@ body {
   font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
-header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px 16px; }
-h1 { font-size: 1.1rem; letter-spacing: .08em; text-transform: uppercase; margin: 0; }
+header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px 16px;
+  padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+.brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.brand img { width: 40px; height: 40px; flex: none; }
+h1 { font-size: 1.35rem; margin: 0; line-height: 1.2; }
+.tagline { color: var(--muted); font-size: .85rem; }
+.status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; background: var(--muted); }
+.status .dot.up { background: var(--ok); }
+.status .dot.busy { background: var(--accent); }
+.scan-ok { color: var(--ok); }
+.scan-bad { color: var(--bad); }
+td .sub { display: block; color: var(--muted); font-size: .8rem; }
 h2 { font-size: .8rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 36px 0 12px; font-weight: 600; }
 .status { color: var(--muted); font-size: .9rem; display: flex; flex-wrap: wrap; gap: 4px 16px; }
 .status .warn { color: var(--bad); }
@@ -49,7 +62,7 @@ h2 { font-size: .8rem; letter-spacing: .06em; text-transform: uppercase; color: 
 .chartbox.tall { height: 320px; }
 .chartbox canvas { max-width: 100%; }
 .chart .empty { padding: 12px 8px; }
-.work p { margin: 0 0 8px; }
+.work p { margin: 0 0 8px; overflow-wrap: anywhere; }
 .muted { color: var(--muted); }
 h2 .hint { text-transform: none; letter-spacing: 0; font-weight: 400; }
 .cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
@@ -68,13 +81,22 @@ details ul { margin: 8px 0 0; padding-left: 18px; word-break: break-all; font-si
 @media (max-width: 700px) {
   main { padding: 16px; }
   .tiles, .cols { grid-template-columns: minmax(0, 1fr); }
+  #scans th, #scans td { white-space: normal; padding: 6px 6px; }
+  #scans td.name { min-width: 0; word-break: normal; }
+  #scans td .sub.detail { display: none; }
 }
 </style>
 </head>
 <body>
 <main>
   <header>
-    <h1>Media Organizer</h1>
+    <div class="brand">
+      <img src="data:image/svg+xml,%3Csvg xmlns='http%3A//www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232457d6'/%3E%3Cpath d='M24 16v32l24-16z' fill='%23fff'/%3E%3Cpath d='M10 22h8M10 32h10M10 42h8' stroke='%23c9d8ff' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E" alt="">
+      <div>
+        <h1>Media Organizer</h1>
+        <div class="tagline">Compressing and sorting the D: and MEGA libraries</div>
+      </div>
+    </div>
     <div class="status" id="status"></div>
   </header>
   <div class="tiles" id="tiles"></div>
@@ -82,18 +104,20 @@ details ul { margin: 8px 0 0; padding-left: 18px; word-break: break-all; font-si
   <ul class="milestones" id="milestones"></ul>
   <h2>First pass</h2>
   <div class="bars" id="firstpass"></div>
-  <h2>Storage freed, last 30 days</h2>
+  <h2 id="title-cum">Storage freed, last 48 hours</h2>
   <div class="card chart" id="chart-cum">
-    <div class="chartbox"><canvas role="img" aria-label="Cumulative GB freed per day, last 30 days"></canvas></div>
+    <div class="chartbox"><canvas role="img" aria-label="Cumulative GB freed, hour by hour, last 48 hours"></canvas></div>
     <div class="empty" hidden></div>
   </div>
-  <h2>Freed per day</h2>
+  <h2 id="title-daily">Freed per hour</h2>
   <div class="card chart" id="chart-daily">
-    <div class="chartbox"><canvas role="img" aria-label="GB freed per day, last 30 days"></canvas></div>
+    <div class="chartbox"><canvas role="img" aria-label="GB freed per hour, last 48 hours"></canvas></div>
     <div class="empty" hidden></div>
   </div>
   <h2>Work</h2>
   <div class="work" id="work"></div>
+  <h2>Scans <span class="hint">(how the program looks for new files)</span></h2>
+  <div id="scans"></div>
   <h2>Biggest folders</h2>
   <div class="cols">
     <div>
@@ -153,11 +177,20 @@ function bar(p) {
 }
 function empty(text) { return el("div", "empty", text); }
 
+function dotted(cls, text) { return el("span", null, null, [el("span", "dot " + cls), document.createTextNode(text)]); }
 function renderStatus(s) {
-  var parts = [el("span", null, s.mac_reachable ? "Mac: reachable" : "Mac: away")];
+  var n = s.now;
+  var parts = [
+    n ? dotted("busy", "Encoding" + (typeof n.progress === "number" ? " " + Math.round(n.progress * 100) + "%" : ""))
+      : dotted("", "Idle"),
+    dotted(s.mac_reachable ? "up" : "", s.mac_reachable ? "Mac online" : "Mac away")
+  ];
   if (s.paused) parts.push(el("span", "pill", "Paused"));
   if (lostConnection) parts.push(el("span", "warn", "Connection lost — retrying"));
+  else if (s.generated) parts.push(el("span", null, "Updated " + new Date(s.generated * 1000).toLocaleTimeString()));
   fill("status", parts);
+  document.title = (s.paused ? "Paused · " : n && typeof n.progress === "number"
+    ? Math.round(n.progress * 100) + "% · " : "") + "Media Organizer";
 }
 
 function tile(label, value, sub) {
@@ -238,10 +271,20 @@ function baseOptions(t, extra) {
   return o;
 }
 
+function series(s) {
+  if (s.hourly) {
+    return s.hourly.map(function (h) {
+      var dt = new Date(h.hour * 1000);
+      return {label: dt.toLocaleDateString([], {weekday: "short"}) + " " +
+                     String(dt.getHours()).padStart(2, "0") + "h", d: h.d, mega: h.mega};
+    });
+  }
+  return s.daily.map(function (d) { return {label: d.date, d: d.d, mega: d.mega}; });
+}
 function dayData(s, cumulative, t) {
-  var days = s.daily;
+  var days = series(s);
   return {
-    labels: days.map(function (d) { return d.date; }),
+    labels: days.map(function (d) { return d.label; }),
     datasets: DAY_SERIES.map(function (sr) {
       var run = 0, color = t[sr[0]];
       var data = days.map(function (d) { run += gbNum(d[sr[0]]); return cumulative ? run : gbNum(d[sr[0]]); });
@@ -263,7 +306,7 @@ function folderData(list, key, t) {
 
 var CHART_IDS = ["chart-cum", "chart-daily", "chart-folders-d", "chart-folders-mega"];
 function gbTicks(o, axis) { o.scales[axis].ticks.callback = function (v) { return gbLabel(v); }; }
-function dateTicks(o) { o.scales.x.ticks.maxTicksLimit = 6; o.scales.x.ticks.maxRotation = 0; }
+function dateTicks(o) { o.scales.x.ticks.maxTicksLimit = window.innerWidth < 700 ? 4 : 8; o.scales.x.ticks.maxRotation = 0; }
 
 function chartData(id, s, t) {
   if (id === "chart-cum") return dayData(s, true, t);
@@ -290,7 +333,9 @@ function dropChart(id) {
   try { if (c && c.destroy) c.destroy(); } catch (err) { /* already broken */ }
 }
 function noteNoData(s) {
-  var none = s.daily.every(function (d) { return !d.d && !d.mega; });
+  document.getElementById("title-cum").textContent = s.hourly ? "Storage freed, last 48 hours" : "Storage freed, last 30 days";
+  document.getElementById("title-daily").textContent = s.hourly ? "Freed per hour" : "Freed per day";
+  var none = series(s).every(function (d) { return !d.d && !d.mega; });
   ["chart-cum", "chart-daily"].forEach(function (id) {
     var msg = document.getElementById(id).querySelector(".empty");
     msg.textContent = none ? "No conversions yet" : "";
@@ -342,9 +387,43 @@ if (window.matchMedia) {
   else if (scheme.addListener) scheme.addListener(applyTheme);
 }
 
-function scanLine(sc) {
-  if (!sc.finished) return sc.name + " never";
-  return sc.name + " " + when(sc.finished) + (sc.ok ? " ok" : " " + (sc.message || "failed"));
+var SCAN_INFO = {
+  "d-intake": ["D: _TO_CONVERT", "new files dropped in for conversion"],
+  "d-full": ["D: whole library", "files saved straight into a library folder"],
+  "mega-intake": ["MEGA: TBC", "new files in the iCloud TBC folder"],
+  "mega-full": ["MEGA: whole library", "files saved anywhere in MEGA"],
+  "win-downloads": ["Windows Downloads", "media to route to D: or MEGA"],
+  "mac-downloads": ["Mac Downloads", "media to route to D: or MEGA"]
+};
+function ago(ts, now) {
+  var m = Math.round((now - ts) / 60), future = m < 0;
+  m = Math.abs(m);
+  var t = m < 1 ? "now" : m < 60 ? m + " min" : m < 48 * 60 ? Math.round(m / 60) + " h" : Math.round(m / 1440) + " days";
+  return t === "now" ? "now" : future ? "in " + t : t + " ago";
+}
+function scanResult(sc) {
+  if (!sc.finished) return ["Not run yet", ""];
+  if (sc.ok) return ["OK", sc.message ? sc.message.replace(/^found/, "Found") : ""];
+  var m = sc.message || "failed";
+  if (m === "unreachable") return ["Mac away", "retried every hour until it answers"];
+  if (m === "root missing") return ["Folder missing", "check that the drive is mounted"];
+  if (m.indexOf("suspect") === 0) return ["Looked empty", "nothing was changed; is the drive mounted?"];
+  return ["Failed", m];
+}
+function renderScans(s) {
+  var now = s.generated || Date.now() / 1000;
+  var rows = s.scans.map(function (sc) {
+    var info = SCAN_INFO[sc.name] || [sc.name, ""], res = scanResult(sc);
+    var what = el("td", "name", info[0], [el("span", "sub detail", info[1])]);
+    var lastCell = el("td", null, sc.finished ? ago(sc.finished, now) : "never",
+                      sc.finished ? [el("span", "sub detail", when(sc.finished))] : []);
+    var resCell = el("td", "name", null, [el("span", sc.ok ? "scan-ok" : sc.finished ? "scan-bad" : "", res[0])]);
+    if (res[1]) resCell.appendChild(el("span", "sub", res[1]));
+    var next = sc.next === undefined ? "" : sc.next === null || sc.next <= now ? "at the next check" : ago(sc.next, now);
+    return el("tr", null, null, [what, lastCell, resCell, el("td", null, next)]);
+  });
+  var head = el("tr", null, null, ["Looks at", "Last run", "Result", "Next run"].map(function (h) { return el("th", null, h); }));
+  fill("scans", [el("div", "scroll", null, [el("table", null, null, [el("thead", null, null, [head]), el("tbody", null, null, rows)])])]);
 }
 function renderWork(s) {
   var kids = [], n = s.now, q = s.queue;
@@ -360,7 +439,6 @@ function renderWork(s) {
   if (q.no_space) queue += " · " + count(q.no_space) + " waiting for space";
   if (q.evict_pending) queue += " · " + count(q.evict_pending) + " to release on the Mac";
   kids.push(el("p", "muted", queue));
-  kids.push(el("p", "muted", "Last scans: " + s.scans.map(scanLine).join(" · ")));
   fill("work", kids);
 }
 
@@ -419,7 +497,7 @@ function renderProblems(s) {
 
 function render(s) {
   renderStatus(s); renderTiles(s); renderMilestones(s); renderFirstPass(s); renderCharts(s);
-  renderWork(s); renderFolders(s); renderRecent(s); renderProblems(s);
+  renderWork(s); renderScans(s); renderFolders(s); renderRecent(s); renderProblems(s);
 }
 
 function refresh() {

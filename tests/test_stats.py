@@ -11,7 +11,7 @@ from tests.helpers import test_config
 
 GB = 1024 ** 3
 KEYS = {"generated", "freed", "disk", "first_pass", "milestones", "daily", "now", "paused",
-        "queue", "scans", "mac_reachable", "folders", "recent", "top_gain", "problems"}
+        "queue", "scans", "mac_reachable", "folders", "recent", "top_gain", "problems", "hourly"}
 
 
 def add_item(con, location, relpath, status, source="library", size=1000, error=None,
@@ -141,6 +141,33 @@ class StatsTest(unittest.TestCase):
         for bad in ("{}", "not json"):
             db.meta_set(self.con, "current", bad)
             self.assertIsNone(stats.summary(self.con, self.cfg)["now"])
+
+    def test_hourly_buckets_cover_48_clock_hours(self):
+        from datetime import datetime
+        now = datetime(2026, 11, 16, 14, 30).timestamp()
+        for ts, loc, saved in ((now, "d", 3), (now - 600, "mega", 2),       # this hour
+                               (now - 3600, "d", 5),                         # 13:xx
+                               (now - 47 * 3600, "d", 7),                    # oldest bucket
+                               (now - 49 * 3600, "d", 100)):                 # too old
+            db.log_conversion(self.con, ts=ts, location=loc, relpath="x.mp4", kind="video",
+                              bytes_before=saved * GB, bytes_after=0)
+        hourly = stats.summary(self.con, self.cfg, now=now)["hourly"]
+        self.assertEqual(len(hourly), 48)
+        self.assertEqual(hourly[-1]["hour"], datetime(2026, 11, 16, 14).timestamp())
+        self.assertEqual((hourly[-1]["d"], hourly[-1]["mega"]), (3 * GB, 2 * GB))
+        self.assertEqual(hourly[-2]["d"], 5 * GB)
+        self.assertEqual(hourly[0]["d"], 7 * GB)
+        self.assertEqual(sum(h["d"] + h["mega"] for h in hourly), 17 * GB)
+
+    def test_scans_say_when_they_run_next(self):
+        db.record_scan(self.con, name="d-intake", started=0, finished=1000.0, ok=True, message="x")
+        db.record_scan(self.con, name="mac-downloads", started=0, finished=1000.0, ok=False,
+                       message="unreachable")
+        scans = {x["name"]: x for x in stats.summary(self.con, self.cfg)["scans"]}
+        self.assertEqual(scans["d-intake"]["next"], 1000.0 + self.cfg.scan_interval_h * 3600)
+        self.assertEqual(scans["mac-downloads"]["next"], 1000.0 + self.cfg.mac_retry_h * 3600)
+        self.assertIsNone(scans["d-full"]["next"])
+        self.assertEqual(scans["d-full"]["kind"], "full")
 
     def test_queue_counts_waiting_for_space_and_pending_evictions(self):
         now = 1_000_000.0

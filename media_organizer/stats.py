@@ -11,6 +11,7 @@ from .config import Config
 from .service import SCANS
 
 DAILY_DAYS = 30
+HOURLY_HOURS = 48
 ETA_WINDOW_DAYS = 3
 FOLDER_LIMIT = 15
 RECENT_LIMIT = 20
@@ -102,6 +103,21 @@ def _daily(con, generated: float) -> list[dict]:
     return list(buckets.values())
 
 
+def _hourly(con, generated: float) -> list[dict]:
+    """Bytes freed per clock hour over the last HOURLY_HOURS hours (the current hour last)."""
+    top = datetime.fromtimestamp(generated).replace(minute=0, second=0, microsecond=0)
+    hours = [top - timedelta(hours=n) for n in range(HOURLY_HOURS - 1, -1, -1)]
+    buckets = {h.timestamp(): {"hour": h.timestamp(), "d": 0, "mega": 0} for h in hours}
+    for row in con.execute("SELECT ts, location, bytes_before - bytes_after AS freed "
+                           "FROM conversions WHERE ts >= ?", (hours[0].timestamp(),)):
+        key = datetime.fromtimestamp(row["ts"]).replace(minute=0, second=0,
+                                                         microsecond=0).timestamp()
+        bucket = buckets.get(key)
+        if bucket is not None and row["location"] in ("d", "mega"):
+            bucket[row["location"]] += int(row["freed"])
+    return list(buckets.values())
+
+
 def _current(con):
     try:
         value = json.loads(db.meta_get(con, "current") or "{}")
@@ -122,16 +138,20 @@ def _queue(con, now: float) -> dict:
                                          ).fetchone()["n"]}
 
 
-def _scans(con) -> list[dict]:
+def _scans(con, cfg: Config) -> list[dict]:
+    """Last run of each scan and when it is next due (the same rule as service.due_scans)."""
     out = []
     for scan in SCANS:
         last = db.last_scan(con, scan.name)
         if last is None or last["finished"] is None:
-            out.append({"name": scan.name, "finished": None, "ok": None, "message": ""})
-        else:
-            out.append({"name": scan.name, "finished": last["finished"],
-                        "ok": None if last["ok"] is None else bool(last["ok"]),
-                        "message": last["message"] or ""})
+            out.append({"name": scan.name, "kind": scan.kind, "finished": None, "ok": None,
+                        "message": "", "next": None})
+            continue
+        ok = None if last["ok"] is None else bool(last["ok"])
+        hours = cfg.full_scan_interval_h if scan.kind == "full" else cfg.scan_interval_h
+        wait = hours if ok else cfg.mac_retry_h
+        out.append({"name": scan.name, "kind": scan.kind, "finished": last["finished"], "ok": ok,
+                    "message": last["message"] or "", "next": last["finished"] + wait * 3600})
     return out
 
 
@@ -177,10 +197,11 @@ def summary(con, cfg: Config, now: float | None = None) -> dict:
         "first_pass": first_pass,
         "milestones": _milestones(first_pass, disk, freed["total"]),
         "daily": _daily(con, generated),
+        "hourly": _hourly(con, generated),
         "now": _current(con),
         "paused": db.meta_get(con, "paused") == "1",
         "queue": _queue(con, generated),
-        "scans": _scans(con),
+        "scans": _scans(con, cfg),
         "mac_reachable": db.meta_get(con, "mac_reachable") == "1",
         "folders": {"d": _folders(con, "d"), "mega": _folders(con, "mega")},
         "recent": [dict(r) for r in recent],

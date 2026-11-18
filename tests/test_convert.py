@@ -33,7 +33,7 @@ class CommandTests(unittest.TestCase):
         for seq in (["-c:v", "libx265", "-preset", "fast", "-crf", "30", "-pix_fmt", "yuv420p10le"],
                     ["-r", "30/1", "-fps_mode", "cfr", "-tag:v", "hvc1"],
                     ["-c:a", "copy"], ["-movflags", "+faststart"],
-                    ["-x265-params", "pools=10"], ["-progress", "pipe:1", "-nostats"]):
+                    ["-x265-params", "pools=8"], ["-progress", "pipe:1", "-nostats"]):
             self.assertTrue(contains_in_order(cmd, seq), seq)
         self.assertTrue(cmd[cmd.index("-i") + 1].startswith("/"))
         self.assertTrue(cmd[-1].startswith("/"))
