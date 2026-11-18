@@ -320,6 +320,8 @@ class Service:
         db.reset_running(self.con)
         shutil.rmtree(cfg.work_dir, ignore_errors=True)
         cfg.work_dir.mkdir(parents=True)
+        self.mac_up()  # before the workers start: an unset cache reads as down, so the video
+        # worker would otherwise claim a D: file for hours although the Mac is up
         threads = [threading.Thread(target=self._worker_loop, args=(k,), name=f"{k}-{i}")
                    for i, k in enumerate(["video"] + ["image"] * cfg.image_workers)]
         # daemon: a probe can sit in ssh/sshfs timeouts; shutdown must not wait for it

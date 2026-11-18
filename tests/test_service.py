@@ -573,5 +573,27 @@ class TickCountTests(Base):
         self.assertEqual(m.call_count, 1)
 
 
+class StartupTests(Base):
+    def test_mac_is_probed_before_the_workers_start(self):
+        seen = []
+
+        class FakeThread:
+            def __init__(s, target=None, args=(), name="", daemon=False):
+                s.name = name
+
+            def start(s):
+                seen.append((s.name, self.svc.mac_cached()))
+
+            def join(s, timeout=None):
+                pass
+        self.svc.stop.set()  # the main loop exits at once
+        with mock.patch.object(service.threading, "Thread", FakeThread), \
+                mock.patch.object(service, "_setup_logging"), \
+                mock.patch.object(service.signal, "signal"):
+            self.svc.run_forever()
+        self.assertEqual(seen[0], ("video-0", True))
+        self.assertTrue(all(up for _, up in seen))
+
+
 if __name__ == "__main__":
     unittest.main()
