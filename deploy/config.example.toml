@@ -14,7 +14,7 @@
 # size_threshold_mb = 400
 # scan_interval_h = 6.0
 # full_scan_interval_h = 168.0
-# mac_retry_h = 1.0
+# mac_retry_h = 0.25
 # folders_refresh_min = 5.0       # how often the dashboard's D: folder sizes are recounted
 # mac_folders_refresh_min = 60.0  # the same for MEGA (only while the Mac is up)
 # min_age_min = 10
@@ -22,8 +22,9 @@
 # image_workers = 4
 # min_gain_ratio = 0.75
 # min_ssim = 0.95
-# crf = 27          # lower = better quality, bigger files
-# preset = "slower" # slower = smaller files at the same quality, longer encodes
+# crf = 29          # lower = better quality, bigger files
+# preset = "fast"   # slower presets = smaller files at the same quality, longer encodes
+# max_video_mb = 1024  # temporary: bigger videos wait in the queue (0 = no limit)
 # x265_pools = 8
 # encode_stall_min = 30
 # hevc_bloat_bpp = 0.07

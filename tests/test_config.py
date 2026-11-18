@@ -8,7 +8,7 @@ from media_organizer.config import Config, load_config
 
 class ConfigTests(unittest.TestCase):
     def test_defaults(self):
-        self.assertEqual(Config().settings, "r75s95c27slowerb70")
+        self.assertEqual(Config().settings, "r75s95c29fastb70")
         self.assertEqual(Config().size_threshold_mb, 400)
         self.assertEqual(Config().db_path.name, "organizer.db")
 

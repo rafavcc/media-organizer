@@ -12,7 +12,7 @@ A service that runs on the Windows 11 PC (inside Ubuntu in WSL2) and makes your 
 
 A converted file carries the time of its conversion as its modification date; an original that is only moved (a `.webp`, or a video or image that was not converted) keeps its own date.
 
-The recipes started from the old `app_compactor` tool; videos now use CRF 27 with the `slower` preset (the old tool used CRF 30, `fast`). One dashboard page and a log show progress: see "Daily use".
+The recipes started from the old `app_compactor` tool; videos use CRF 29 with the `fast` preset (the old tool used CRF 30, `fast`). For now, videos over 1 GB are left in the queue (`max_video_mb`). One dashboard page and a log show progress: see "Daily use".
 
 ## Contents
 
@@ -221,7 +221,7 @@ First pass   D: library   412 / 1,496 items   freed 231.4 GB   D: free 257 GB
              MEGA          3,120 / 9,870 files  freed  18.2 GB
 Queue        2 Downloads · 0 inbox · 6,750 MEGA · 1,084 library · 3 waiting for space · 5 to release on the Mac
 Now          encoding "clip_1080p.mp4" (2.1 GB)  37%
-Last scans   D: intake 12:00 ok · D: full 03:10 ok · MEGA intake 12:00 ok · MEGA full 03:40 ok · Win Downloads 12:00 ok · Mac Downloads 12:00 unreachable, retry 13:00
+Last scans   D: intake 12:00 ok · D: full 03:10 ok · MEGA intake 12:00 ok · MEGA full 03:40 ok · Win Downloads 12:00 ok · Mac Downloads 12:00 unreachable, retry 12:15
 Problems     3 errors · 222 no-gain · 7 low-quality · 1 changed · 2 multi-frame · 1 stuck (original not deleted)      (media-organizer status --errors)
 ```
 
@@ -230,7 +230,7 @@ Other things you can do:
 - **Dashboard:** `http://localhost:8002` on the PC, `http://192.168.0.33:8002` from other devices. Read-only: space freed, D: free space, milestones, progress, charts (space freed over time, conversions per day, the biggest folders on D: and in MEGA), the 20 newest conversions, the 20 biggest gains of the last 6 hours, and problems. The charts use Chart.js, which the program serves itself (behind the same password), so the page needs no internet connection; if the chart library cannot load, the charts show "Charts unavailable" and the rest of the page works. It still works when the Mac is off (MEGA figures are from the last scan). Pause, resume and retry are only available on the command line.
 - **Log:** `~/.local/share/media-organizer/organizer.log` (rotated, 5 files of 5 MB). Follow it with `tail -f ~/.local/share/media-organizer/organizer.log`, or `journalctl --user -u media-organizer -f`.
 - **Service:** `systemctl --user stop|start|restart media-organizer`. Stop waits up to 60 seconds for the running encode to be put back cleanly.
-- **When things are scanned:** the intake folders (`D:\_TO_CONVERT`, `MEGA/TBC`) and both Downloads folders (with all their subfolders) every 6 hours; both whole libraries once a week; Mac scans are retried every hour while the Mac is away.
+- **When things are scanned:** the intake folders (`D:\_TO_CONVERT`, `MEGA/TBC`) and both Downloads folders (with all their subfolders) every 6 hours; both whole libraries once a week; Mac scans are retried every 15 minutes while the Mac is away, and right away once it is back.
 - Files modified in the last 10 minutes, empty files, files starting with `.` and `.part`, `.crdownload`, `.download` files are ignored until they settle.
 - **Downloads cleanup.** Besides moving media, each Downloads sweep (Windows and Mac) deletes things it considers clutter. **This is permanent: no Recycle Bin.**
   - Every file ending in `.nfo` (any capitals), in any subfolder, once it is at least 10 minutes old.
@@ -309,7 +309,7 @@ Each file the program knows has a status, and often a reason. Statuses appear in
 ## When something goes wrong
 
 - **The service stopped, or WSL or the PC restarted mid-encode.** Nothing is lost. At the next start, files marked running go back to the queue, the temporary work folder is emptied, and the encode starts again from the beginning. A half-written `.mo-part` file left in a library is deleted by the next weekly whole-library scan once it is old. Originals are only deleted after the checks, so an interrupted file is simply tried again. If a leftover `*_compressed` file and its original both exist, the next pass handles them; do not delete either by hand while the service is running.
-- **The Mac is away (asleep, off, or off the network).** Nothing is flagged or deleted. Files that need the Mac stay `queued`, and the Mac scans are retried every hour. Work on D: continues meanwhile. When the Mac is back, it carries on by itself. If it never recovers, check `ssh mac true` first, then `mount | grep media-organizer`; a stale mount is cleaned up by the service on its next attempt.
+- **The Mac is away (asleep, off, or off the network).** Nothing is flagged or deleted. Files that need the Mac stay `queued`, and the Mac scans are retried every 15 minutes (and as soon as the Mac answers again; it is checked every 30 seconds). Work on D: continues meanwhile. When the Mac is back, it carries on by itself. If it never recovers, check `ssh mac true` first, then `mount | grep media-organizer`; a stale mount is cleaned up by the service on its next attempt.
 - **D: (or the Mac) is nearly full.** Before copying a file the program checks that the destination has 75% of the original's size plus `min_free_gb` (2 GB) free, and that the work folder has twice the original's size plus 2 GB. If not, the file waits as `queued` / `no-space` for one hour and other files go first; `status` shows how many are `waiting for space`. Each converted file frees its original's space once the original is deleted. If the drive is completely full, free a few GB by hand (for example delete files you do not need); the waiting files are tried again within the hour. The work folder is `work` inside the state folder; it lives on the Linux disk.
 - **The database was lost or deleted** (`~/.local/share/media-organizer/organizer.db`). Restart the service (`systemctl --user restart media-organizer`); it creates a new empty database and starts over by scanning. Optionally run `media-organizer import-legacy` first to re-import the old tool's rejections. Files already ending in `_compressed` are never processed again, so nothing is compressed twice. Files that were rejected before (the original is still there) are simply tried once more and rejected again; this wastes time but is harmless. Only a conversion interrupted at exactly the wrong moment could leave one extra copy, named like `a_jpg_compressed.webp` next to `a_compressed.webp`; delete the extra by hand.
 - **An original came back after it was deleted (iCloud).** The old tool's README describes iCloud restoring files that were created and deleted within seconds. This program writes the new file with a temporary name inside the folder, renames it, and waits before deleting an original on the Mac; but the real iCloud behaviour has not been checked against this program (see "Status of this release"). If you see a file and its `_compressed` copy both back, tell the developer, and do not delete the `_compressed` one until you have checked it plays.
@@ -345,8 +345,10 @@ All settings are in `~/.config/media-organizer/config.toml`; `deploy/config.exam
 | `image_workers` | 4 | Images converted in parallel (videos always one at a time) |
 | `min_free_gb` | 2 | Free space to keep on the destination drive |
 | `mac_host` | `mac` | The ssh alias of the Mac |
-| `crf` | 27 | Video quality: lower is better quality and bigger files (x265 CRF) |
-| `preset` | `slower` | x265 speed: slower gives smaller files at the same quality but takes longer (`medium`, `slow`, `slower`, `veryslow`) |
+| `crf` | 29 | Video quality: lower is better quality and bigger files (x265 CRF) |
+| `preset` | `fast` | x265 speed: slower presets give smaller files at the same quality but take much longer (`fast`, `medium`, `slow`, `slower`, `veryslow`) |
+| `max_video_mb` | 1024 | Temporary: videos bigger than this stay `queued` and are not encoded yet (0 = no limit) |
+| `mac_retry_h` | 0.25 | Hours before a failed scan is tried again; a scan that failed because the Mac was away also runs as soon as the Mac is back |
 | `encode_stall_min` | 30 | Minutes without any encoding progress after which a video encode is considered stuck |
 | `min_age_min` | 10 | Minutes a file or folder must be unchanged before it is touched (applies to library and intake files, Downloads media, `.nfo` files and empty folders) |
 

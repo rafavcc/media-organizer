@@ -24,7 +24,9 @@ log = logging.getLogger(__name__)
 TICK_S = 30
 SNAPSHOT_EVERY_S = 3600  # history-chart points, however often the folders are recounted
 IDLE_S = 15
-MAC_CACHE_S = 60
+MAC_CACHE_S = 60  # a fresher answer is reused instead of probing again
+MAC_PROBE_S = 30  # the background prober refreshes the answer this often
+MAC_STALE_S = 300  # workers count an answer older than this as DOWN (prober stuck/stopped)
 CURRENT_EVERY_S = 10
 JOIN_TIMEOUT_S = 20
 
@@ -53,11 +55,14 @@ class Stopping(BaseException):
     """
 
 
-def due_scans(con, cfg: Config, now: float) -> list[ScanDef]:
+def due_scans(con, cfg: Config, now: float, mac_up: bool = False) -> list[ScanDef]:
+    """Scans due now. With `mac_up`, a scan that failed because the Mac was away is due at once."""
     due = []
     for scan in SCANS:
         last = db.last_scan(con, scan.name)
         if last is None:
+            is_due = True
+        elif mac_up and not last["ok"] and last["message"] == "unreachable":
             is_due = True
         else:
             hours = cfg.full_scan_interval_h if scan.kind == "full" else cfg.scan_interval_h
@@ -142,28 +147,44 @@ class Service:
         self.con = db.open_db(cfg.db_path)
         self.stop = threading.Event()
         self.current: dict = {}
-        self._mac_lock = threading.Lock()
+        self._mac_lock = threading.Lock()  # guards the cached answer; never held while probing
+        self._probe_lock = threading.Lock()  # one probe at a time (it can mount/unmount)
         self._mac_ok = False
         self._mac_at: float | None = None
         self._current_at = 0.0
 
     # -- Mac reachability: one shared in-memory cache (no database access, worker threads
-    #    call this); tick() persists it. Both Mac locations share one session --
+    #    call this); tick() persists it. Both Mac locations share one session. A background
+    #    prober keeps it fresh, so a long tick (scans, finalizing) cannot let it expire and
+    #    make the workers pick D: videos while the Mac is in fact up --
     def mac_cached(self, now: float | None = None) -> bool:
-        """The cached answer, for any thread. Never probes: an expired or unset cache is DOWN."""
+        """The cached answer, for any thread. Never probes: an unset or stale cache is DOWN."""
         now = time.time() if now is None else now
         with self._mac_lock:
-            return (self._mac_at is not None and now - self._mac_at < MAC_CACHE_S
+            return (self._mac_at is not None and now - self._mac_at < MAC_STALE_S
                     and self._mac_ok)
 
     def mac_up(self, now: float | None = None) -> bool:
-        """Refresh the cache when expired (it can mount/unmount and wait on ssh): main thread only."""
+        """Refresh the cache when older than MAC_CACHE_S (it can mount/unmount and wait on ssh).
+        Main thread and the prober only. Workers keep reading the old answer meanwhile."""
         now = time.time() if now is None else now
-        with self._mac_lock:
-            if self._mac_at is None or now - self._mac_at >= MAC_CACHE_S:
-                macs = [loc for loc in self.locs.values() if loc.is_mac]
-                self._mac_ok, self._mac_at = bool(macs) and macs[0].reachable(), now
-            return self._mac_ok
+        with self._probe_lock:
+            with self._mac_lock:
+                if self._mac_at is not None and now - self._mac_at < MAC_CACHE_S:
+                    return self._mac_ok
+            macs = [loc for loc in self.locs.values() if loc.is_mac]
+            ok = bool(macs) and macs[0].reachable()
+            with self._mac_lock:
+                self._mac_ok, self._mac_at = ok, now
+            return ok
+
+    def _mac_probe_loop(self) -> None:
+        while not self.stop.is_set():
+            try:
+                self.mac_up()
+            except Exception:
+                log.exception("Mac probe failed")
+            self.stop.wait(MAC_PROBE_S)
 
     def _mac_down(self) -> None:
         with self._mac_lock:
@@ -184,7 +205,7 @@ class Service:
         finalize_published(self.con, self.locs, self.cfg, cached, count_failures=False,
                            evictions=False)
         run_sorter(self.con, self.locs, self.cfg)
-        for scan in due_scans(self.con, self.cfg, time.time()):
+        for scan in due_scans(self.con, self.cfg, time.time(), mac_up=self.mac_up()):
             if self.stop.is_set():
                 return
             self.mac_up()
@@ -227,7 +248,8 @@ class Service:
         if self.stop.is_set() or db.meta_get(con, "paused") == "1":
             return None
         excluded = [] if self.mac_cached() else [l.name for l in self.locs.values() if l.is_mac]
-        item = db.claim_next(con, kind=kind, exclude_locations=excluded)
+        max_size = self.cfg.max_video_mb * 1024 * 1024 if kind == "video" else None
+        item = db.claim_next(con, kind=kind, exclude_locations=excluded, max_size=max_size or None)
         if item is None:
             return None
         is_video = kind == "video"
@@ -300,6 +322,8 @@ class Service:
         cfg.work_dir.mkdir(parents=True)
         threads = [threading.Thread(target=self._worker_loop, args=(k,), name=f"{k}-{i}")
                    for i, k in enumerate(["video"] + ["image"] * cfg.image_workers)]
+        # daemon: a probe can sit in ssh/sshfs timeouts; shutdown must not wait for it
+        threads.append(threading.Thread(target=self._mac_probe_loop, name="mac-probe", daemon=True))
         for t in threads:
             t.start()
         log.info("started")

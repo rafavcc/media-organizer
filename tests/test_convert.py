@@ -40,11 +40,11 @@ class CommandTests(unittest.TestCase):
         cmd = video_cmd(Path("in.mp4"), Path("out.mp4"), fake_info(("pcm_s16le",)), cfg)
         self.assertTrue(contains_in_order(cmd, ["-c:a", "aac", "-b:a", "192k"]))
 
-    def test_encoder_defaults_are_crf27_slower(self):
+    def test_encoder_defaults_are_crf29_fast(self):
         from media_organizer.config import Config
-        self.assertEqual((Config().crf, Config().preset), (27, "slower"))
+        self.assertEqual((Config().crf, Config().preset), (29, "fast"))
         cmd = video_cmd(Path("in.mp4"), Path("out.mp4"), fake_info(("aac",)), Config())
-        self.assertTrue(contains_in_order(cmd, ["-preset", "slower", "-crf", "27"]))
+        self.assertTrue(contains_in_order(cmd, ["-preset", "fast", "-crf", "29"]))
 
     def test_preset_change_counts_as_a_settings_change(self):
         self.assertNotEqual(test_config(Path("/tmp"), preset="slow").settings,

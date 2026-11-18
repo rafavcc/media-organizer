@@ -80,11 +80,28 @@ class SchedulerTests(Base):
         self.assertEqual(self.names(T + 169 * H),
                          {"d-full", "mega-full", "win-downloads", "mac-downloads"})
 
-    def test_failed_scan_retries_after_an_hour(self):
+    def test_failed_scan_retries_after_a_quarter_hour(self):
         self.all_ran(T)
         self.ran("mac-downloads", T + 1 * H, ok=False)
-        self.assertNotIn("mac-downloads", self.names(T + 1 * H + 59 * 60))
-        self.assertIn("mac-downloads", self.names(T + 1 * H + 61 * 60))
+        self.assertNotIn("mac-downloads", self.names(T + 1 * H + 14 * 60))
+        self.assertIn("mac-downloads", self.names(T + 1 * H + 16 * 60))
+
+    def test_unreachable_scan_is_due_as_soon_as_the_mac_is_back(self):
+        self.all_ran(T)
+        db.record_scan(self.con, name="mega-intake", started=T + H, finished=T + H, ok=False,
+                       message="unreachable")
+        db.record_scan(self.con, name="d-intake", started=T + H, finished=T + H, ok=False,
+                       message="root missing")
+        due = lambda up: {s.name for s in due_scans(self.con, self.cfg, T + H + 60, mac_up=up)}
+        self.assertEqual(due(False), set())
+        self.assertEqual(due(True), {"mega-intake"})  # other failures keep their retry wait
+
+    def test_tick_runs_the_unreachable_scan_when_the_mac_returns(self):
+        self.all_ran(time.time())
+        db.record_scan(self.con, name="mac-downloads", started=time.time(),
+                       finished=time.time(), ok=False, message="unreachable")
+        self.svc.tick()
+        self.assertEqual(db.last_scan(self.con, "mac-downloads")["ok"], 1)
 
     def test_unreachable_mac_is_recorded(self):
         self.set_mac(False)
@@ -304,6 +321,22 @@ class WorkTests(Base):
         self.assertEqual(self.row("d.png")["status"], "done")
         self.assertFalse(self.svc.mac_up())
 
+    def test_big_videos_wait_while_max_video_mb_is_set(self):
+        (self.d.root / "big.mp4").write_bytes(b"0" * 3000)
+        (self.d.root / "small.mp4").write_bytes(b"0" * 1000)
+        self.queue(self.d, "big.mp4", source="library", priority=3)
+        self.queue(self.d, "small.mp4", source="library", priority=3)
+        claimed = []
+        fake = lambda con, item, *a, **k: claimed.append(item["relpath"]) or "done"
+        with mock.patch.object(worker, "process_item", side_effect=fake):
+            self.svc.cfg = test_config(self.tmp, max_video_mb=2000 / 1024 / 1024)
+            self.svc.work_once("video")
+            self.assertIsNone(self.svc.work_once("video"))  # big.mp4 stays queued
+            self.assertEqual(self.row("big.mp4")["status"], "queued")
+            self.svc.cfg = test_config(self.tmp, max_video_mb=0)  # 0 = no limit
+            self.svc.work_once("video")
+        self.assertEqual(claimed, ["small.mp4", "big.mp4"])
+
     def test_mac_reachability_is_cached_for_a_minute(self):
         calls = []
         self.mega.reachable = lambda: calls.append(1) or True
@@ -473,8 +506,39 @@ class WorkerCacheTests(Base):
         self.assertFalse(self.on_thread(lambda: self.svc._worker_is_up("mega")))
         self.assertTrue(self.on_thread(lambda: self.svc._worker_is_up("d")))
         self.assertEqual(self.row("m.png", "mega")["status"], "queued")
-        self.svc._mac_ok, self.svc._mac_at = True, time.time() - 120  # expired
+        self.svc._mac_ok, self.svc._mac_at = True, time.time() - 120  # older than MAC_CACHE_S
+        self.assertTrue(self.on_thread(lambda: self.svc.mac_cached()))  # a slow tick is fine
+        self.svc._mac_at = time.time() - service.MAC_STALE_S - 1  # stale: prober stuck
         self.assertFalse(self.on_thread(lambda: self.svc.mac_cached()))
+
+    def test_workers_read_the_old_answer_while_a_probe_runs(self):
+        self.svc._mac_ok, self.svc._mac_at = True, time.time() - 120
+        probing, release = threading.Event(), threading.Event()
+
+        def slow():
+            probing.set()
+            release.wait(5)
+            return False
+        self.mega.reachable = slow
+        t = threading.Thread(target=self.svc.mac_up)
+        t.start()
+        self.assertTrue(probing.wait(5))
+        self.assertTrue(self.on_thread(lambda: self.svc.mac_cached()))  # not blocked
+        release.set()
+        t.join()
+        self.assertFalse(self.svc.mac_cached())
+
+    def test_prober_refreshes_the_cache_without_any_tick(self):
+        self.assertFalse(self.svc.mac_cached())
+        with mock.patch.object(service, "MAC_PROBE_S", 0.01):
+            t = threading.Thread(target=self.svc._mac_probe_loop)
+            t.start()
+            deadline = time.time() + 5
+            while not self.svc.mac_cached() and time.time() < deadline:
+                time.sleep(0.01)
+            self.svc.stop.set()
+            t.join(5)
+        self.assertTrue(self.svc.mac_cached())
 
     def test_tick_refreshes_the_cache_for_workers(self):
         make_image(self.mega.root / "m.png")

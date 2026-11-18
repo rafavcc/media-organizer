@@ -22,7 +22,7 @@ class Config:
     size_threshold_mb: int = 400
     scan_interval_h: float = 6.0
     full_scan_interval_h: float = 168.0
-    mac_retry_h: float = 1.0
+    mac_retry_h: float = 0.25  # a failed scan is retried this soon (or as soon as the Mac is back)
     folders_refresh_min: float = 5.0  # D: folder sizes for the dashboard (0 = only at scans)
     mac_folders_refresh_min: float = 60.0  # the same for MEGA, only while the Mac is up
     min_age_min: int = 10
@@ -30,8 +30,9 @@ class Config:
     image_workers: int = 4
     min_gain_ratio: float = 0.75
     min_ssim: float = 0.95
-    crf: int = 27
-    preset: str = "slower"
+    crf: int = 29
+    preset: str = "fast"
+    max_video_mb: int = 1024  # TEMPORARY: bigger videos wait in the queue (0 = no limit)
     x265_pools: int = 8
     encode_stall_min: float = 30.0  # kill ffmpeg when its progress has not moved this long
     hevc_bloat_bpp: float = 0.07

@@ -154,18 +154,20 @@ def planned_names(con, location: str, folder: str, exclude_id: int | None = None
 
 
 def claim_next(con, *, kind: str, exclude_locations: Collection[str],
-               now: float | None = None):
+               now: float | None = None, max_size: int | None = None):
+    """Claim the next queued item; items bigger than `max_size` bytes are left queued."""
     now = time.time() if now is None else now
     excluded = list(exclude_locations)
     marks = ",".join("?" * len(excluded))
     clause = (f" AND location NOT IN ({marks}) AND (dest_location IS NULL "
               f"OR dest_location NOT IN ({marks}))") if excluded else ""
+    sized = " AND size <= ?" if max_size else ""
     with _tx(con):
         row = con.execute(
             "SELECT id FROM items WHERE status='queued' AND kind=? "
-            "AND (not_before IS NULL OR not_before <= ?)" + clause +
+            "AND (not_before IS NULL OR not_before <= ?)" + clause + sized +
             " ORDER BY priority ASC, size DESC, id ASC LIMIT 1",
-            (kind, now, *excluded, *excluded)).fetchone()
+            (kind, now, *excluded, *excluded, *([max_size] if max_size else []))).fetchone()
         if row is None:
             return None
         con.execute("UPDATE items SET status='running', attempts=attempts+1, started_at=? "
