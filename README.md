@@ -53,7 +53,7 @@ Everything below is typed in the Ubuntu (WSL) terminal unless it says PowerShell
 Everything is run from the repository folder. To avoid typing the long form, add this alias once:
 
 ```bash
-cd /mnt/c/Users/rafavcc/iCloudDrive/Programming/Projects/media_organizer
+cd /home/rafavcc/media-organizer
 echo "alias media-organizer='python3 -m media_organizer.cli'" >> ~/.bashrc
 source ~/.bashrc
 ```
