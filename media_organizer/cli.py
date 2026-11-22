@@ -1,4 +1,6 @@
-"""Command line: run the service, show status, dry-run a scan, pause/resume, and housekeeping."""
+# PYTHON_ARGCOMPLETE_OK
+"""Command line: run the service, show status, dry-run a scan, pause/resume, shrink files, and
+housekeeping."""
 from __future__ import annotations
 
 import argparse
@@ -12,6 +14,12 @@ from .legacy import import_legacy
 from .locations import Location, MacUnreachable, build_locations
 from .probe import check_tools
 from .service import SCANS, Service
+from .shrink import shrink_file
+
+try:  # optional: tab completion when python3-argcomplete is installed (see README)
+    import argcomplete
+except ImportError:
+    argcomplete = None
 from .web import serve_in_thread
 
 GIB = 1024 ** 3
@@ -184,6 +192,17 @@ def _run(cfg: Config, args) -> int:
     return 0
 
 
+def _shrink(cfg: Config, args) -> int:
+    """Exit 1 if any file hit an error; skips and rejected conversions are not errors."""
+    failed = False
+    for path in args.files:
+        res = shrink_file(path, cfg)
+        detail = f" -> {res.path.name}" if res.status == "ok" else ""
+        print(f"{res.status} {path}{detail} ({res.message})", flush=True)
+        failed |= res.status == "error"
+    return 1 if failed else 0
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="media-organizer")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH,
@@ -200,11 +219,16 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("resume", help="resume encoding")
     sub.add_parser("retry-errors", help="requeue every item in error")
     sub.add_parser("import-legacy", help="import flags from the old compactor")
+    shrink = sub.add_parser("shrink", help="convert image files to WebP in place (no database)")
+    shrink.add_argument("files", nargs="+", type=Path, help="image files to shrink")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    if argcomplete is not None:
+        argcomplete.autocomplete(parser)  # answers a tab press and exits; a no-op otherwise
+    args = parser.parse_args(argv)
     cfg = load_config(args.config)
     if args.command == "run":
         return _run(cfg, args)
@@ -219,6 +243,8 @@ def main(argv: list[str] | None = None) -> int:
         return _meta_command(cfg, "paused", "1")
     if args.command == "resume":
         return _meta_command(cfg, "paused", "0")
+    if args.command == "shrink":
+        return _shrink(cfg, args)
     if args.command == "retry-errors":
         print(_with_db(cfg, db.retry_errors))
         return 0

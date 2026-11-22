@@ -19,6 +19,8 @@ The recipes started from the old `app_compactor` tool; videos use CRF 29 with th
 - [Before you start](#before-you-start)
 - [First run, step by step](#first-run-step-by-step)
 - [Daily use](#daily-use)
+- [Shrinking gallery-dl downloads](#shrinking-gallery-dl-downloads)
+- [Tab completion (optional)](#tab-completion-optional)
 - [Opening the dashboard from other devices](#opening-the-dashboard-from-other-devices)
 - [Keeping it running](#keeping-it-running)
 - [What the statuses mean](#what-the-statuses-mean)
@@ -247,6 +249,54 @@ Files in `D:\7_XYZ\_TO_CONVERT` are, after conversion, moved to `_CONVERTED` and
 - On each change the program tidies `performers.txt` as the old sorter did: names in Title Case, duplicates removed, sorted, "Pmv Compilation" first.
 - `media-organizer scan --dry-run` lists the moves as `WOULD SORT` lines without making them.
 
+## Shrinking gallery-dl downloads
+
+`media-organizer shrink FILE...` converts image files to WebP where they are, with the same settings and checks as the service (`min_gain_ratio`, `min_ssim`). It does not need the service running and does not touch its database.
+
+- On success the `.webp` is written next to the original (as `name (1).webp` if `name.webp` already exists), keeps the original's date and permissions, and the original is deleted.
+- If the result is not small enough or not good enough (`no-gain`, `low-quality`), or the image has several frames or pages, the original is kept unchanged.
+- Videos, `.webp` files and anything else are skipped.
+- One line is printed per file. The exit code is 1 only if a file hit an error.
+
+To shrink each image as soon as gallery-dl downloads it, add this to `~/.config/gallery-dl/config.json`:
+
+```json
+{
+  "extractor": {
+    "archive": "~/.config/gallery-dl/archive.sqlite3",
+    "postprocessors": [{
+      "name": "exec",
+      "event": "after",
+      "command": ["env", "PYTHONPATH=/home/rafavcc/media-organizer",
+                  "python3", "-m", "media_organizer.cli", "shrink", "{_path}"]
+    }]
+  }
+}
+```
+
+gallery-dl waits for each shrink to finish before it downloads the next file, so only one unconverted image is on disk at a time, and requests to the site are spaced out. The `archive` line is required. Without it gallery-dl looks for `name.jpg`, no longer finds it (it is now `name.webp`), and downloads it again on every run.
+
+## Tab completion (optional)
+
+With completion on, typing `media-organizer sh` and pressing Tab gives `shrink`, and Tab after `status --` lists its options. File names complete too. It needs one system package and one small launcher script; the program itself works the same without them.
+
+1. Install the helper: `sudo apt install python3-argcomplete`
+2. Create the launcher `~/.local/bin/media-organizer` (make sure `~/.local/bin` is on your `PATH`):
+
+   ```python
+   #!/usr/bin/env python3
+   # PYTHON_ARGCOMPLETE_OK
+   import sys
+   sys.path.insert(0, "/home/rafavcc/media-organizer")
+   from media_organizer.cli import main
+   raise SystemExit(main())
+   ```
+
+   then `chmod +x ~/.local/bin/media-organizer`. The line `# PYTHON_ARGCOMPLETE_OK` must stay: completion ignores scripts without it.
+3. Turn it on in every new terminal: `echo 'eval "$(register-python-argcomplete media-organizer)"' >> ~/.bashrc`
+
+Remove the `alias media-organizer=...` line from `~/.bashrc` if you added it: the launcher replaces it and works from any folder. The service and the gallery-dl hook keep running `python3 -m media_organizer.cli` and are not affected. A plain alias does not work for completion, because completion has to run the command itself.
+
 ## Opening the dashboard from other devices
 
 The dashboard listens on port 8002 inside WSL. By default only the PC itself can reach it. First confirm the PC's home-network address: run `ipconfig` in PowerShell and look at the IPv4 address (this README assumes `192.168.0.33`). Then pick **one** of these:
@@ -339,7 +389,8 @@ All settings are in `~/.config/media-organizer/config.toml`; `deploy/config.exam
 | `performers_file` | `performers.txt` in the repository folder | List of performer names used to sort `_TO_CONVERT` results |
 | `size_threshold_mb` | 400 | Downloads video size above which it goes to `_TO_CONVERT` |
 | `scan_interval_h` | 6 | Hours between scans of intake and Downloads |
-| `full_scan_interval_h` | 168 | Hours between whole-library scans |
+| `full_scan_interval_h` | 168 | Hours between whole-library scans of D: |
+| `mega_full_scan_interval_h` | 0.5 | Hours between whole-library scans of MEGA (only while the Mac is reachable; takes a few minutes) |
 | `folders_refresh_min` | 5 | Minutes between recounts of the D: folder sizes shown in "Biggest folders" (0 = only at scans). Takes about a second |
 | `mac_folders_refresh_min` | 60 | The same for MEGA; only while the Mac is reachable (0 = only at scans) |
 | `image_workers` | 4 | Images converted in parallel (videos always one at a time) |

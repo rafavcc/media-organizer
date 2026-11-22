@@ -4,6 +4,7 @@ import tempfile
 import threading
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -74,11 +75,19 @@ class SchedulerTests(Base):
 
     def test_intervals(self):
         self.all_ran(T)
-        self.assertEqual(self.names(T + 5 * H), set())
+        self.assertEqual(self.names(T + 0.4 * H), set())
+        self.assertEqual(self.names(T + 0.6 * H), {"mega-full"})  # MEGA: every half hour
+        self.ran("mega-full", T + 6 * H)
         self.assertEqual(self.names(T + 6.1 * H),
                          {"d-intake", "mega-intake", "win-downloads", "mac-downloads"})
         self.assertEqual(self.names(T + 169 * H),
                          {"d-full", "mega-full", "win-downloads", "mac-downloads"})
+
+    def test_mega_full_interval_is_its_own_setting(self):
+        self.cfg = replace(self.cfg, mega_full_scan_interval_h=2.0)
+        self.all_ran(T)
+        self.assertEqual(self.names(T + 1.9 * H), set())
+        self.assertEqual(self.names(T + 2.1 * H), {"mega-full"})
 
     def test_failed_scan_retries_after_a_quarter_hour(self):
         self.all_ran(T)
@@ -88,6 +97,7 @@ class SchedulerTests(Base):
 
     def test_unreachable_scan_is_due_as_soon_as_the_mac_is_back(self):
         self.all_ran(T)
+        self.ran("mega-full", T + H)
         db.record_scan(self.con, name="mega-intake", started=T + H, finished=T + H, ok=False,
                        message="unreachable")
         db.record_scan(self.con, name="d-intake", started=T + H, finished=T + H, ok=False,

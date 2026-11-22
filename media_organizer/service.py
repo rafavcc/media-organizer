@@ -55,6 +55,13 @@ class Stopping(BaseException):
     """
 
 
+def scan_interval_h(cfg: Config, scan: ScanDef) -> float:
+    """Hours between successful runs of `scan`."""
+    if scan.kind != "full":
+        return cfg.scan_interval_h
+    return cfg.mega_full_scan_interval_h if scan.location == "mega" else cfg.full_scan_interval_h
+
+
 def due_scans(con, cfg: Config, now: float, mac_up: bool = False) -> list[ScanDef]:
     """Scans due now. With `mac_up`, a scan that failed because the Mac was away is due at once."""
     due = []
@@ -65,8 +72,7 @@ def due_scans(con, cfg: Config, now: float, mac_up: bool = False) -> list[ScanDe
         elif mac_up and not last["ok"] and last["message"] == "unreachable":
             is_due = True
         else:
-            hours = cfg.full_scan_interval_h if scan.kind == "full" else cfg.scan_interval_h
-            wait = hours if last["ok"] else cfg.mac_retry_h
+            wait = scan_interval_h(cfg, scan) if last["ok"] else cfg.mac_retry_h
             is_due = now - last["finished"] >= wait * 3600
         if is_due:
             due.append(scan)

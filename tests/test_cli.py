@@ -223,5 +223,21 @@ class ScanTests(CliCase):
         self.assertFalse(self.cfg.state_dir.exists())
 
 
+class CompletionTests(CliCase):
+    def test_works_without_argcomplete_installed(self):
+        with mock.patch.object(cli, "argcomplete", None):
+            code, out = self.run_cli("status")
+        self.assertEqual(code, 0)
+        self.assertIn("First pass", out)
+
+    def test_hands_the_parser_to_argcomplete_when_installed(self):
+        fake = mock.Mock()
+        with mock.patch.object(cli, "argcomplete", fake):
+            code, _ = self.run_cli("status")
+        self.assertEqual(code, 0)
+        fake.autocomplete.assert_called_once()
+        self.assertEqual(fake.autocomplete.call_args.args[0].prog, "media-organizer")
+
+
 if __name__ == "__main__":
     unittest.main()
