@@ -3,7 +3,7 @@ Description=Media organizer (compress the D: and MEGA libraries, sweep Downloads
 
 [Service]
 Type=simple
-WorkingDirectory=/home/rafavcc/media-organizer
+WorkingDirectory=/home/rafavcc/dev/media-organizer
 ExecStart=/usr/bin/python3 -m media_organizer.cli run
 Environment=PYTHONUNBUFFERED=1
 CPUQuota=800%
