@@ -62,13 +62,40 @@ class ShrinkFileTests(ShrinkCase):
         self.assertEqual(res.path, src)
         self.assertEqual(src.read_bytes(), before)
 
-    def test_video_is_skipped_untouched(self):
-        src = make_video(self.dir / "v.mp4", seconds=1)
+    def test_h264_mp4_is_replaced_in_place_by_hevc_mp4(self):
+        src = make_video(self.dir / "v.mp4", seconds=2)
+        os.utime(src, (1_600_000_000, 1_600_000_000))
         with mock.patch("media_organizer.shrink.convert") as conv:
+            tmp = self.dir / "mo-fake.mp4"
+            tmp.write_bytes(b"small")
+            conv.return_value = Outcome("ok", "x -> 5", tmp)
             res = shrink_file(src, self.cfg)
-        conv.assert_not_called()
-        self.assertEqual(res.status, "skipped")
-        self.assertTrue(src.exists())
+        self.assertEqual(res.status, "ok", res.message)
+        self.assertEqual(res.path, src)
+        self.assertEqual(src.read_bytes(), b"small")
+        self.assertEqual(int(src.stat().st_mtime), 1_600_000_000)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_non_mp4_video_becomes_mp4_and_original_is_removed(self):
+        src = self.dir / "v.webm"
+        src.write_bytes(b"orig")
+        (self.dir / "v.mp4").write_bytes(b"keep me")
+        tmp = self.dir / "mo-fake.mp4"
+        tmp.write_bytes(b"small")
+        with mock.patch("media_organizer.shrink.convert",
+                        return_value=Outcome("ok", "x", tmp)):
+            res = shrink_file(src, self.cfg)
+        self.assertEqual(res.path, self.dir / "v (1).mp4")
+        self.assertFalse(src.exists())
+        self.assertEqual((self.dir / "v.mp4").read_bytes(), b"keep me")
+
+    def test_efficient_video_is_left_untouched(self):
+        src = make_video(self.dir / "v.mp4", seconds=1, codec="libx265",
+                         extra=["-tag:v", "hvc1", "-b:v", "10k"])
+        before = src.read_bytes()
+        res = shrink_file(src, self.cfg)
+        self.assertNotEqual(res.status, "ok")
+        self.assertEqual(src.read_bytes(), before)
 
     def test_webp_and_unknown_files_are_skipped(self):
         for name in ("x.webp", "notes.txt"):

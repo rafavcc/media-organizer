@@ -219,8 +219,8 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("resume", help="resume encoding")
     sub.add_parser("retry-errors", help="requeue every item in error")
     sub.add_parser("import-legacy", help="import flags from the old compactor")
-    shrink = sub.add_parser("shrink", help="convert image files to WebP in place (no database)")
-    shrink.add_argument("files", nargs="+", type=Path, help="image files to shrink")
+    shrink = sub.add_parser("shrink", help="convert images to WebP and videos to HEVC in place (no database)")
+    shrink.add_argument("files", nargs="+", type=Path, help="image or video files to shrink")
     return parser
 
 
