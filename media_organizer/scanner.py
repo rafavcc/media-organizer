@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from . import db, rules
 from .config import Config
 from .locations import PART_SUFFIX, Location, NoSpace
-from .probe import probe_video
 
 JUNK_NAMES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
 log = logging.getLogger(__name__)
@@ -45,17 +44,6 @@ def _old_enough(loc: Location, entry, cfg: Config) -> bool:
 def _row_id(con, location: str, relpath: str) -> int:
     return con.execute("SELECT id FROM items WHERE location=? AND relpath=?",
                        (location, relpath)).fetchone()["id"]
-
-
-def _skip_if_efficient(con, loc: Location, cfg: Config, relpath: str) -> bool:
-    info = probe_video(loc.path(relpath))
-    if info is None:
-        return False
-    bpp = rules.bits_per_pixel(info.bitrate, info.width, info.height, info.fps_value)
-    if rules.video_decision(info.codec, bpp, cfg) != "efficient":
-        return False
-    db.set_status(con, _row_id(con, loc.name, relpath), "skipped", reason="efficient")
-    return True
 
 
 def _has_rows(con, location: str, under: str) -> bool:
@@ -109,8 +97,6 @@ def scan_library(con, loc: Location, cfg: Config, *, sub: str = "", full: bool,
             settings=cfg.settings)
         if outcome == "known":
             res.known += 1
-            continue
-        if kind == "video" and not loc.is_mac and _skip_if_efficient(con, loc, cfg, entry.relpath):
             continue
         res.queued += 1
     if full and entries == 0 and _has_rows(con, loc.name, sub):

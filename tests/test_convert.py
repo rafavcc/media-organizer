@@ -6,7 +6,7 @@ from unittest import mock
 import unittest
 from pathlib import Path
 
-from media_organizer import probe, rules
+from media_organizer import probe
 from media_organizer.convert import convert, video_mismatch
 from media_organizer.encode import image_cmd, video_cmd
 from media_organizer.probe import VideoInfo, check_tools, gif_frames, probe_video, webp_frames, dims
@@ -127,19 +127,17 @@ class ConvertTests(unittest.TestCase):
         self.assertLessEqual(res.out.stat().st_size, 0.75 * src.stat().st_size)
         self.assertTrue(res.out.resolve().is_relative_to(self.work.resolve()))
 
-    def test_hevc_low_bitrate_is_efficient(self):
+    def test_hevc_low_bitrate_is_encoded(self):
+        # no codec or bitrate is skipped any more: only the size check decides
         src = make_video(self.src_dir / "a.mp4", codec="libx265", extra=["-crf", "40"])
         res = self.run_convert(src)
-        self.assertEqual(res.status, "efficient")
-        self.assertIsNone(res.out)
-        self.assertEqual(list(self.work.iterdir()), [])
+        self.assertIn(res.status, ("ok", "no-gain"), res.message)
 
-    def test_hevc_bloated_is_encoded(self):
-        src = make_video(self.src_dir / "a.mp4", codec="libx265",
-                         extra=["-vf", "noise=alls=40:allf=t", "-b:v", "6M"])
-        info = probe_video(src)
-        self.assertGreater(rules.bits_per_pixel(info.bitrate, info.width, info.height, info.fps_value), 0.07)
-        self.assertIn(self.run_convert(src).status, ("ok", "no-gain"))
+    def test_hevc_high_bitrate_is_converted(self):
+        src = make_video(self.src_dir / "a.mp4", codec="libx265", extra=["-b:v", "4M"])
+        res = self.run_convert(src)
+        self.assertEqual(res.status, "ok", res.message)
+        self.assertEqual(probe_video(res.out).codec, "hevc")
 
     def test_no_gain(self):
         src = make_video(self.src_dir / "a.mp4", extra=["-b:v", "4M"])

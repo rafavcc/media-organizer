@@ -89,7 +89,7 @@ class ShrinkFileTests(ShrinkCase):
         self.assertFalse(src.exists())
         self.assertEqual((self.dir / "v.mp4").read_bytes(), b"keep me")
 
-    def test_efficient_video_is_left_untouched(self):
+    def test_video_that_does_not_shrink_is_left_untouched(self):
         src = make_video(self.dir / "v.mp4", seconds=1, codec="libx265",
                          extra=["-tag:v", "hvc1", "-b:v", "10k"])
         before = src.read_bytes()

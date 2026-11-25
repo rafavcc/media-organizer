@@ -6,13 +6,13 @@ A service that runs on the Windows 11 PC (inside Ubuntu in WSL2) and makes your 
 2. **Downloads are swept.** Every 6 hours it takes the images and videos from the Windows Downloads folder and the Mac Downloads folder **and all their subfolders** (folders whose name starts with `.` are skipped, and links to other folders are never followed). A video bigger than 400 MB goes to `D:\7_XYZ\_TO_CONVERT`; every other video and all images go to `MEGA/TBC`, compressed on the way (`.webp` files are only moved there, never converted). Files land in the destination under their own name, without the subfolder; two files with the same name get `(1)`, `(2)`, ... (or a different `_compressed` name). The same sweep **deletes every `.nfo` file** it finds in Downloads and **deletes empty folders** there (details below).
 3. **`_TO_CONVERT` is sorted by performer.** After conversion each file from `D:\7_XYZ\_TO_CONVERT` goes into `D:\7_XYZ\<performer>\`, matched by name against `performers.txt` (details under "Sorting by performer"). A file with no match waits in `_CONVERTED`.
 4. **Originals are deleted** once the new file is verified. There is no backup and no Recycle Bin. A file is only replaced when all of this is true:
-   - the new file is at most 75% of the original size (otherwise nothing is gained and the original stays);
+   - the new file is at most 90% of the original size, so it saves at least 10% (otherwise the original stays). Every video is tried, whatever its codec: H.264, H.265 and AV1 alike;
    - it has the same width and height, the same number of audio tracks and (video) the same length within 1 second, the same frame rate and the HEVC codec; images must also look the same (similarity score at least 0.95);
    - the new file is in its final place with the right size, and the original has not been changed since the program read it.
 
 A converted file carries the time of its conversion as its modification date; an original that is only moved (a `.webp`, or a video or image that was not converted) keeps its own date.
 
-The recipes started from the old `app_compactor` tool; videos use CRF 29 with the `fast` preset (the old tool used CRF 30, `fast`). For now, videos over 1 GB are left in the queue (`max_video_mb`). One dashboard page and a log show progress: see "Daily use".
+The recipes started from the old `app_compactor` tool; videos use CRF 29 with the `fast` preset (the old tool used CRF 30, `fast`). Videos of any size are encoded: on this PC `max_video_mb` is set to 0 (no limit); the default of 1 GB leaves bigger videos in the queue. One dashboard page and a log show progress: see "Daily use".
 
 ## Contents
 
@@ -55,7 +55,7 @@ Everything below is typed in the Ubuntu (WSL) terminal unless it says PowerShell
 Everything is run from the repository folder. To avoid typing the long form, add this alias once:
 
 ```bash
-cd /home/rafavcc/media-organizer
+cd /home/rafavcc/dev/media-organizer
 echo "alias media-organizer='python3 -m media_organizer.cli'" >> ~/.bashrc
 source ~/.bashrc
 ```
@@ -64,7 +64,7 @@ Wherever this README says `media-organizer ...`, run it **from the repository fo
 
 ## First run, step by step
 
-The first full pass over the roughly 860 GB in D: takes **days to weeks**. That is normal. The PC stays usable: the service is capped at 50% of the CPU and runs at the lowest priority.
+The first full pass over the roughly 860 GB in D: takes **days to weeks**. That is normal. The PC stays usable: the service is capped at 6 of the 16 CPU threads (`CPUQuota=600%`, about 37% of the CPU) and at 3 GB of RAM (`MemoryHigh=3G`; `MemoryMax=5G` is the hard limit), and runs at the lowest priority. The RAM cap mostly keeps the file cache of the big video copies from filling WSL's memory; a 1080p encode itself uses under 1 GB (measured), a 4K one an estimated 1.5–2.5 GB. Both caps are in `deploy/media-organizer.service`; after changing them run `cp deploy/media-organizer.service ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user restart media-organizer` (the installed unit is a copy, not a link).
 
 1. **Create the settings file and set the password.**
 
@@ -267,7 +267,7 @@ To shrink each image as soon as gallery-dl downloads it, add this to `~/.config/
     "postprocessors": [{
       "name": "exec",
       "event": "after",
-      "command": ["env", "PYTHONPATH=/home/rafavcc/media-organizer",
+      "command": ["env", "PYTHONPATH=/home/rafavcc/dev/media-organizer",
                   "python3", "-m", "media_organizer.cli", "shrink", "{_path}"]
     }]
   }
@@ -278,24 +278,30 @@ gallery-dl waits for each shrink to finish before it downloads the next file, so
 
 ## Tab completion (optional)
 
-With completion on, typing `media-organizer sh` and pressing Tab gives `shrink`, and Tab after `status --` lists its options. File names complete too. It needs one system package and one small launcher script; the program itself works the same without them.
+With completion on, typing `media-organizer ` and pressing Tab twice lists every command with a short description beside it, one per line, like `gh` does. `media-organizer sh` + Tab completes to `shrink`, and file names complete too. It needs one system package, a small launcher script and one line in `~/.bashrc`; the program itself works the same without them.
 
 1. Install the helper: `sudo apt install python3-argcomplete`
-2. Create the launcher `~/.local/bin/media-organizer` (make sure `~/.local/bin` is on your `PATH`):
+2. Create the launcher with this one command. It writes the file with no indentation, which matters: the first line **must** start at the very first character, or completion silently does nothing.
 
-   ```python
-   #!/usr/bin/env python3
-   # PYTHON_ARGCOMPLETE_OK
-   import sys
-   sys.path.insert(0, "/home/rafavcc/media-organizer")
-   from media_organizer.cli import main
-   raise SystemExit(main())
-   ```
+```bash
+mkdir -p ~/.local/bin
+cat > ~/.local/bin/media-organizer <<'EOF'
+#!/usr/bin/env python3
+# PYTHON_ARGCOMPLETE_OK
+import sys
+sys.path.insert(0, "/home/rafavcc/dev/media-organizer")
+from media_organizer.cli import main
+raise SystemExit(main())
+EOF
+chmod +x ~/.local/bin/media-organizer
+```
 
-   then `chmod +x ~/.local/bin/media-organizer`. The line `# PYTHON_ARGCOMPLETE_OK` must stay: completion ignores scripts without it.
-3. Turn it on in every new terminal: `echo 'eval "$(register-python-argcomplete media-organizer)"' >> ~/.bashrc`
+   Make sure `~/.local/bin` is on your `PATH`. If the repository is somewhere else, change the path in the fourth line of the script.
+3. Turn it on in every new terminal: `echo 'source /home/rafavcc/dev/media-organizer/deploy/media-organizer.bash' >> ~/.bashrc`
 
-Remove the `alias media-organizer=...` line from `~/.bashrc` if you added it: the launcher replaces it and works from any folder. The service and the gallery-dl hook keep running `python3 -m media_organizer.cli` and are not affected. A plain alias does not work for completion, because completion has to run the command itself.
+Remove the `alias media-organizer=...` line, and any `register-python-argcomplete media-organizer` line, from `~/.bashrc`: the launcher and the `source` line replace them. The launcher also works from any folder. The service and the gallery-dl hook keep running `python3 -m media_organizer.cli` and are not affected. A plain alias does not work for completion, because completion has to run the command itself.
+
+The descriptions are the `help=` texts in [cli.py](media_organizer/cli.py). The completion script is [deploy/media-organizer.bash](deploy/media-organizer.bash) and is for bash only.
 
 ## Opening the dashboard from other devices
 
@@ -342,14 +348,14 @@ Each file the program knows has a status, and often a reason. Statuses appear in
 | Status | Reason | Meaning | What happens next |
 |---|---|---|---|
 | `queued` | | Waiting its turn (Downloads first, then the inbox folders, then MEGA, then the D: library; largest first within each) | Processed in time |
-| `queued` | `no-space` | Not enough free space: the destination needs 75% of the original plus `min_free_gb`, and the work folder 2 times the original plus `min_free_gb` (checked before anything is copied; also set when writing the result finds the drive full) | Left alone for one hour, then tried again; other files go first meanwhile. `status` counts these as `waiting for space`; see "D: nearly full" |
+| `queued` | `no-space` | Not enough free space: the destination needs 90% of the original (`min_gain_ratio`) plus `min_free_gb`, and the work folder 2 times the original plus `min_free_gb` (checked before anything is copied; also set when writing the result finds the drive full) | Left alone for one hour, then tried again; other files go first meanwhile. `status` counts these as `waiting for space`; see "D: nearly full" |
 | `queued` | `name-taken` | Another file took the planned name at the last moment | Planned again at once with a fresh name |
 | `running` | | Being converted right now | If the service stops, it goes back to `queued` |
 | `published` | | New file written and in place; waiting to delete the original (on the Mac it waits a few seconds, `mac_delete_delay_s`, default 5, before deleting) | Original deleted when its checks pass |
 | `done` | | Converted, original deleted | Never touched again |
 | `done` | `post-step-failed` | Converted, but moving it to `_CONVERTED` failed | Retried automatically; look in the log |
-| `skipped` | `efficient` | A video already in AV1, or in H.265 at a bitrate that is already low | Left alone |
-| `rejected` | `no-gain` | The result was bigger than 75% of the original | Original kept; not retried unless the file or the settings change |
+| `skipped` | `efficient` | No longer used. Older versions skipped AV1 videos and low-bitrate H.265 videos; tests showed they still shrink, so these rows are queued again at the next scan of their folder | Queued again |
+| `rejected` | `no-gain` | The result was bigger than 90% of the original (`min_gain_ratio`) | Original kept; not retried unless the file or the settings change |
 | `rejected` | `low-quality` | An image's similarity score was below 0.95 | Original kept; same |
 | `rejected` | `multi-frame` | An image with several pages or frames (multi-page TIFF, multi-image HEIC, animated PNG); only one frame would survive | Original kept; not retried unless the file changes |
 | `rejected` | `changed` | The original changed while it was being processed | The file is queued again if a later scan sees it changed; the new file is kept |
@@ -360,7 +366,7 @@ Each file the program knows has a status, and often a reason. Statuses appear in
 
 - **The service stopped, or WSL or the PC restarted mid-encode.** Nothing is lost. At the next start, files marked running go back to the queue, the temporary work folder is emptied, and the encode starts again from the beginning. A half-written `.mo-part` file left in a library is deleted by the next weekly whole-library scan once it is old. Originals are only deleted after the checks, so an interrupted file is simply tried again. If a leftover `*_compressed` file and its original both exist, the next pass handles them; do not delete either by hand while the service is running.
 - **The Mac is away (asleep, off, or off the network).** Nothing is flagged or deleted. Files that need the Mac stay `queued`, and the Mac scans are retried every 15 minutes (and as soon as the Mac answers again; it is checked every 30 seconds). Work on D: continues meanwhile. When the Mac is back, it carries on by itself. If it never recovers, check `ssh mac true` first, then `mount | grep media-organizer`; a stale mount is cleaned up by the service on its next attempt.
-- **D: (or the Mac) is nearly full.** Before copying a file the program checks that the destination has 75% of the original's size plus `min_free_gb` (2 GB) free, and that the work folder has twice the original's size plus 2 GB. If not, the file waits as `queued` / `no-space` for one hour and other files go first; `status` shows how many are `waiting for space`. Each converted file frees its original's space once the original is deleted. If the drive is completely full, free a few GB by hand (for example delete files you do not need); the waiting files are tried again within the hour. The work folder is `work` inside the state folder; it lives on the Linux disk.
+- **D: (or the Mac) is nearly full.** Before copying a file the program checks that the destination has 90% of the original's size plus `min_free_gb` (2 GB) free, and that the work folder has twice the original's size plus 2 GB. If not, the file waits as `queued` / `no-space` for one hour and other files go first; `status` shows how many are `waiting for space`. Each converted file frees its original's space once the original is deleted. If the drive is completely full, free a few GB by hand (for example delete files you do not need); the waiting files are tried again within the hour. The work folder is `work` inside the state folder; it lives on the Linux disk.
 - **The database was lost or deleted** (`~/.local/share/media-organizer/organizer.db`). Restart the service (`systemctl --user restart media-organizer`); it creates a new empty database and starts over by scanning. Optionally run `media-organizer import-legacy` first to re-import the old tool's rejections. Files already ending in `_compressed` are never processed again, so nothing is compressed twice. Files that were rejected before (the original is still there) are simply tried once more and rejected again; this wastes time but is harmless. Only a conversion interrupted at exactly the wrong moment could leave one extra copy, named like `a_jpg_compressed.webp` next to `a_compressed.webp`; delete the extra by hand.
 - **An original came back after it was deleted (iCloud).** The old tool's README describes iCloud restoring files that were created and deleted within seconds. This program writes the new file with a temporary name inside the folder, renames it, and waits before deleting an original on the Mac; but the real iCloud behaviour has not been checked against this program (see "Status of this release"). If you see a file and its `_compressed` copy both back, tell the developer, and do not delete the `_compressed` one until you have checked it plays.
 - **Port already in use.** The log says "dashboard disabled: cannot bind port"; the rest of the service still works. Change `web_port` in the settings file and restart.
@@ -393,12 +399,14 @@ All settings are in `~/.config/media-organizer/config.toml`; `deploy/config.exam
 | `mega_full_scan_interval_h` | 0.5 | Hours between whole-library scans of MEGA (only while the Mac is reachable; takes a few minutes) |
 | `folders_refresh_min` | 5 | Minutes between recounts of the D: folder sizes shown in "Biggest folders" (0 = only at scans). Takes about a second |
 | `mac_folders_refresh_min` | 60 | The same for MEGA; only while the Mac is reachable (0 = only at scans) |
-| `image_workers` | 4 | Images converted in parallel (videos always one at a time) |
+| `image_workers` | 4 | Images converted in parallel (videos always one at a time). This PC uses 2, to save RAM |
+| `x265_pools` | 8 | Threads the video encoder uses; more is faster but uses more RAM and CPU. This PC uses 4 |
 | `min_free_gb` | 2 | Free space to keep on the destination drive |
 | `mac_host` | `mac` | The ssh alias of the Mac |
 | `crf` | 29 | Video quality: lower is better quality and bigger files (x265 CRF) |
 | `preset` | `fast` | x265 speed: slower presets give smaller files at the same quality but take much longer (`fast`, `medium`, `slow`, `slower`, `veryslow`) |
-| `max_video_mb` | 1024 | Temporary: videos bigger than this stay `queued` and are not encoded yet (0 = no limit) |
+| `min_gain_ratio` | 0.90 | A converted file replaces the original only if it is at most this share of the original's size (0.90 = saves at least 10%) |
+| `max_video_mb` | 1024 | Videos bigger than this stay `queued` and are not encoded (0 = no limit). This PC uses 0 |
 | `mac_retry_h` | 0.25 | Hours before a failed scan is tried again; a scan that failed because the Mac was away also runs as soon as the Mac is back |
 | `encode_stall_min` | 30 | Minutes without any encoding progress after which a video encode is considered stuck |
 | `min_age_min` | 10 | Minutes a file or folder must be unchanged before it is touched (applies to library and intake files, Downloads media, `.nfo` files and empty folders) |
@@ -407,7 +415,7 @@ All settings are in `~/.config/media-organizer/config.toml`; `deploy/config.exam
 
 **Downloads paths are checked at start.** `win_downloads`, `d_root` and `state_dir` must be absolute paths (`~` is allowed; links are followed before the checks). The program refuses to start when `win_downloads` is `/`, a drive (`/mnt/c`), `/mnt/c/Users`, a user's home folder, or overlaps `d_root` or `state_dir`; or when `mac_downloads` is empty, `.`, `Desktop`, `Documents`, `Library` or inside `Library`, or overlaps `mac_mega`. The message names the key.
 
-Restart the service after a change: `systemctl --user restart media-organizer`. An unknown key makes the program refuse to start, with the key's name in the message. If you change the quality settings (`crf`, `preset`, `min_gain_ratio`, `min_ssim`, `hevc_bloat_bpp`), previously rejected files are looked at again, and `import-legacy` skips the old verdicts.
+Restart the service after a change: `systemctl --user restart media-organizer`. An unknown key makes the program refuse to start, with the key's name in the message. If you change the quality settings (`crf`, `preset`, `min_gain_ratio`, `min_ssim`), previously rejected files are looked at again, and `import-legacy` skips the old verdicts.
 
 ## Status of this release
 
@@ -422,7 +430,7 @@ Play the results on the iPhone and the Mac. The real service is enabled only aft
 
 **Assumptions the trials must verify** (none of these could be checked without the real machines):
 
-- **CPU cap.** Run `systemctl --user show media-organizer -p CPUQuotaPerSecUSec` and watch Task Manager during an encode: the service should stay near 50% of the CPU. A user unit in WSL may not be able to apply the cap.
+- **CPU and RAM caps.** Run `systemctl --user show media-organizer -p CPUQuotaPerSecUSec -p MemoryHigh -p MemoryMax`; it should print `6s`, `3221225472` and `5368709120`. During an encode the service should stay near 37% of the CPU in Task Manager. During a 4K encode, check the peak with `cat /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/media-organizer.service/memory.peak`: if it comes close to 5 GB, raise `MemoryMax` or lower `x265_pools`.
 - **Online-only detection.** On the Mac, `/usr/bin/stat -f %f <an online-only file>` must have bit `0x40000000` set (`stat -f %f` prints decimal; check with a known online-only file and a downloaded one). Use `/usr/bin/stat` because another `stat` earlier in the path would behave differently.
 - **`brctl download` and `brctl evict` while a file is still uploading.** An evict of a file that iCloud has not finished uploading may be refused; the program retries the evict every tick for 7 days (`status` shows `to release on the Mac`) but the real behaviour is unknown.
 - **The Mac sleeping in the middle of a copy.** What the sshfs mount returns then (an error that looks like a broken disk, or a hang) is unknown; the program turns such errors into "Mac away" only when a quick `ssh true` fails too.

@@ -29,14 +29,13 @@ class Config:
     min_age_min: int = 10
     mac_delete_delay_s: int = 5
     image_workers: int = 4
-    min_gain_ratio: float = 0.75
+    min_gain_ratio: float = 0.90
     min_ssim: float = 0.95
     crf: int = 29
     preset: str = "fast"
     max_video_mb: int = 1024  # TEMPORARY: bigger videos wait in the queue (0 = no limit)
     x265_pools: int = 8
     encode_stall_min: float = 30.0  # kill ffmpeg when its progress has not moved this long
-    hevc_bloat_bpp: float = 0.07
     min_free_gb: float = 2.0
     web_port: int = 8002
     web_password: str = ""
@@ -61,7 +60,7 @@ class Config:
     def settings(self) -> str:
         return (
             f"r{self.min_gain_ratio * 100:.0f}s{self.min_ssim * 100:.0f}"
-            f"c{self.crf}{self.preset}b{self.hevc_bloat_bpp * 1000:.0f}"
+            f"c{self.crf}{self.preset}"
         )
 
 

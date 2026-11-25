@@ -2,8 +2,7 @@ import unittest
 
 from media_organizer.config import Config
 from media_organizer.rules import (
-    bits_per_pixel, final_name, free_name, is_candidate, kind_of,
-    route_download, video_decision,
+    final_name, free_name, is_candidate, kind_of, route_download,
 )
 
 CFG = Config()
@@ -24,21 +23,6 @@ class KindAndCandidateTests(unittest.TestCase):
         self.assertFalse(is_candidate("x.mp4.part"))
         self.assertTrue(is_candidate("x.mp4"))
 
-
-class VideoDecisionTests(unittest.TestCase):
-    def test_decisions(self):
-        self.assertEqual(video_decision("h264", None, CFG), "encode")
-        self.assertEqual(video_decision("av1", 9.0, CFG), "efficient")
-        self.assertEqual(video_decision("hevc", 0.05, CFG), "efficient")
-        self.assertEqual(video_decision("hevc", 0.071, CFG), "encode")
-        self.assertEqual(video_decision("hevc", None, CFG), "efficient")
-
-    def test_bits_per_pixel(self):
-        self.assertAlmostEqual(bits_per_pixel(8_000_000, 1920, 1080, 30.0), 0.1286, places=3)
-        self.assertIsNone(bits_per_pixel(None, 1920, 1080, 30.0))
-        self.assertIsNone(bits_per_pixel(8_000_000, 0, 1080, 30.0))
-        self.assertIsNone(bits_per_pixel(8_000_000, 1920, 0, 30.0))
-        self.assertIsNone(bits_per_pixel(8_000_000, 1920, 1080, 0))
 
 
 class RouteDownloadTests(unittest.TestCase):

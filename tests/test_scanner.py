@@ -65,12 +65,12 @@ class LibraryScanTests(ScannerCase):
                          ("queued", "library", 3, "video"))
         self.assertEqual((res.queued, res.known), (1, 0))
 
-    def test_hevc_low_bitrate_is_skipped_as_efficient(self):
+    def test_hevc_low_bitrate_is_queued(self):
         age(make_video(self.cfg.d_root / "h.mp4", codec="libx265",
                        extra=["-b:v", "50k", "-tag:v", "hvc1"]))
         scan_library(self.con, self.d, self.cfg, full=False)
         r = self.rows()[0]
-        self.assertEqual((r["status"], r["reason"]), ("skipped", "efficient"))
+        self.assertEqual((r["status"], r["reason"]), ("queued", None))
 
     def test_intake_folder(self):
         (self.cfg.d_root / "_TO_CONVERT").mkdir()

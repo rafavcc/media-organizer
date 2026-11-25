@@ -52,22 +52,6 @@ def out_ext(name: str) -> str:
     return ".mp4" if kind_of(name) == "video" else ".webp"
 
 
-def bits_per_pixel(bitrate: int | None, width: int, height: int, fps: float) -> float | None:
-    if bitrate is None or not width or not height or not fps:
-        return None
-    return bitrate / (width * height * fps)
-
-
-def video_decision(codec: str, bpp: float | None, cfg: Config) -> str:
-    """HEVC is re-encoded only when its bits per pixel exceed the bloat threshold; AV1 never."""
-    codec = codec.lower()
-    if codec == "av1":
-        return "efficient"
-    if codec == "hevc":
-        return "encode" if bpp is not None and bpp > cfg.hevc_bloat_bpp else "efficient"
-    return "encode"
-
-
 def route_download(name: str, size: int, cfg: Config) -> str | None:
     if is_ignored(name) or is_compressed_name(name):
         return None

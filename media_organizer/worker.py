@@ -26,14 +26,13 @@ _post_step_lock = threading.Lock()
 _name_lock = threading.Lock()
 MTIME_TOLERANCE_S = 2.0
 NO_SPACE_BACKOFF_S = 3600
-OUTPUT_RATIO = 0.75  # an accepted output is at most this share of the original
 FINALIZE_MAX_FAILS = 5
 EVICT_GIVE_UP_S = 7 * 86400
 _POST_STEP_STATUSES = ("done", "skipped", "rejected")
 NAME_TAKEN_BACKOFF_S = 60
 EVICT_BUDGET_S = 60.0
 _NO_PLAN = {"final_relpath": None, "final_size": None, "final_mtime": None}
-_REJECT_STATUSES = {"efficient": "skipped", "no-gain": "rejected", "low-quality": "rejected",
+_REJECT_STATUSES = {"no-gain": "rejected", "low-quality": "rejected",
                     "multi-frame": "rejected", "error": "error"}
 
 
@@ -70,7 +69,7 @@ def _taken_in(con, loc: Location, folder: str, item_id: int) -> Callable[[str], 
 def _require_space(loc: Location, cfg: Config, work: Path, size: int) -> None:
     """Back off (NoSpace) before fetching when the destination or the work folder is too full."""
     min_free = int(cfg.min_free_gb * 1024 ** 3)
-    if loc.free_bytes() < size * OUTPUT_RATIO + min_free:
+    if loc.free_bytes() < size * cfg.min_gain_ratio + min_free:
         raise NoSpace(f"{loc.name}: not enough free space for {size} bytes")
     if shutil.disk_usage(work).free < 2 * size + min_free:  # the fetched copy plus the encode
         raise NoSpace(f"work folder: not enough free space for {size} bytes")
@@ -249,7 +248,7 @@ def _process_download(con, item, locs, cfg, tmp, on_progress, is_up=None) -> str
         landed = dest.stat(item["final_relpath"])
         if _landed_is_ours(landed, item):
             # an earlier attempt published this copy but was cut off before the source was deleted
-            # converted output is at most 75% of the source; an unconverted payload is equal
+            # converted output is at most min_gain_ratio of the source; an unconverted payload is equal
             return _finish_download(con, item, src_loc, dest, item["final_relpath"],
                                     landed.size, converted=item["final_size"] < item["size"])
         db.set_status(con, item["id"], "running", **_NO_PLAN)

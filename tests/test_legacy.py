@@ -17,7 +17,7 @@ class LegacyTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.cfg = test_config(self.root)
+        self.cfg = test_config(self.root, min_gain_ratio=0.75)  # the old tool's verdicts are under 75%
         self.con = db.open_db(self.root / "state" / "o.db")
         self.addCleanup(self.con.close)
         d = str(self.cfg.d_root)

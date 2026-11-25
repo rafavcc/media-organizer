@@ -207,10 +207,10 @@ class NoSpaceBackoffTests(Base):
         self.assertEqual(self.claim(now=r["not_before"] + 1)["relpath"], "big.mp4")
         self.assertEqual(self.row(small)["status"], "running")
 
-    def test_required_space_is_three_quarters_plus_min_free(self):
+    def test_required_space_is_gain_ratio_plus_min_free(self):
         p = make_video(self.mega.root / "x.mp4")
         item = self.add(self.mega, "x.mp4")
-        need = math.ceil(p.stat().st_size * 0.75) + int(self.cfg.min_free_gb * 1024 ** 3)
+        need = math.ceil(p.stat().st_size * self.cfg.min_gain_ratio) + int(self.cfg.min_free_gb * 1024 ** 3)
         self.mega.free = need - 1
         self.assertEqual(self.run_item(item), "queued")
         self.assertEqual(self.mega.fetched, [])
@@ -697,7 +697,7 @@ class DownloadsTests(Base):
         self.assertFalse((self.dl.root / "pic.webp").exists())
         self.assertEqual(self.conversions(), [])
 
-    def test_efficient_original_moved_with_free_name(self):
+    def test_no_gain_original_moved_with_free_name(self):
         make_video(self.dl.root / "v.mp4", codec="libx265")
         (self.mega.root / "TBC").mkdir()
         (self.mega.root / "TBC" / "v.mp4").write_bytes(b"x")

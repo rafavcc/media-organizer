@@ -18,7 +18,7 @@ VIA_IM_EXT = frozenset({".heic", ".heif", ".tif", ".tiff", ".bmp"})
 
 @dataclass(frozen=True)
 class Outcome:
-    status: str  # "ok" | "efficient" | "no-gain" | "low-quality" | "multi-frame" | "error"
+    status: str  # "ok" | "no-gain" | "low-quality" | "multi-frame" | "error"
     message: str
     out: Path | None = None  # set only when status == "ok"
 
@@ -38,9 +38,6 @@ def _convert_video(src: Path, orig_size: int, work: Path, cfg: Config,
     info = probe.probe_video(src)
     if info is None:
         return Outcome("error", "ffprobe could not read the video")
-    bpp = rules.bits_per_pixel(info.bitrate, info.width, info.height, info.fps_value)
-    if rules.video_decision(info.codec, bpp, cfg) == "efficient":
-        return Outcome("efficient", f"already {info.codec}")
 
     tmp = _temp(work, ".mp4")
     keep = False

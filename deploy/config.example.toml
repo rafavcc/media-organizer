@@ -21,14 +21,13 @@
 # min_age_min = 10
 # mac_delete_delay_s = 5
 # image_workers = 4
-# min_gain_ratio = 0.75
+# min_gain_ratio = 0.90  # a result must be at most this share of the original
 # min_ssim = 0.95
 # crf = 29          # lower = better quality, bigger files
 # preset = "fast"   # slower presets = smaller files at the same quality, longer encodes
 # max_video_mb = 1024  # temporary: bigger videos wait in the queue (0 = no limit)
 # x265_pools = 8
 # encode_stall_min = 30
-# hevc_bloat_bpp = 0.07
 # min_free_gb = 2.0
 # web_port = 8002
 web_password = "change-me"
