@@ -6,13 +6,15 @@ Type=simple
 WorkingDirectory=/home/rafavcc/dev/media-organizer
 ExecStart=/usr/bin/python3 -m media_organizer.cli run
 Environment=PYTHONUNBUFFERED=1
-CPUQuota=800%
+CPUQuota=600%
 Nice=19
 IOSchedulingClass=idle
 Restart=on-failure
 RestartSec=60
 KillSignal=SIGTERM
 TimeoutStopSec=60
+MemoryHigh=3G
+MemoryMax=5G
 
 [Install]
 WantedBy=default.target
