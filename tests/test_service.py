@@ -95,6 +95,13 @@ class SchedulerTests(Base):
         self.assertNotIn("mac-downloads", self.names(T + 1 * H + 14 * 60))
         self.assertIn("mac-downloads", self.names(T + 1 * H + 16 * 60))
 
+    def test_unreachable_scan_retries_every_minute(self):
+        self.all_ran(T)
+        db.record_scan(self.con, name="mac-downloads", started=T + H, finished=T + H, ok=False,
+                       message="unreachable")
+        self.assertNotIn("mac-downloads", self.names(T + H + 50))
+        self.assertIn("mac-downloads", self.names(T + H + 61))
+
     def test_unreachable_scan_is_due_as_soon_as_the_mac_is_back(self):
         self.all_ran(T)
         self.ran("mega-full", T + H)
@@ -102,7 +109,7 @@ class SchedulerTests(Base):
                        message="unreachable")
         db.record_scan(self.con, name="d-intake", started=T + H, finished=T + H, ok=False,
                        message="root missing")
-        due = lambda up: {s.name for s in due_scans(self.con, self.cfg, T + H + 60, mac_up=up)}
+        due = lambda up: {s.name for s in due_scans(self.con, self.cfg, T + H + 30, mac_up=up)}
         self.assertEqual(due(False), set())
         self.assertEqual(due(True), {"mega-intake"})  # other failures keep their retry wait
 

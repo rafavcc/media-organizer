@@ -405,7 +405,7 @@ function scanResult(sc) {
   if (!sc.finished) return ["Not run yet", ""];
   if (sc.ok) return ["OK", sc.message ? sc.message.replace(/^found/, "Found") : ""];
   var m = sc.message || "failed";
-  if (m === "unreachable") return ["Mac away", "retried every hour until it answers"];
+  if (m === "unreachable") return ["Mac away", "retried every minute until it answers"];
   if (m === "root missing") return ["Folder missing", "check that the drive is mounted"];
   if (m.indexOf("suspect") === 0) return ["Looked empty", "nothing was changed; is the drive mounted?"];
   return ["Failed", m];

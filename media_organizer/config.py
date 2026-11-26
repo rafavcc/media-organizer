@@ -23,7 +23,8 @@ class Config:
     scan_interval_h: float = 6.0
     full_scan_interval_h: float = 168.0  # D: whole-library scans
     mega_full_scan_interval_h: float = 0.5  # MEGA: whole-library scans (only while the Mac is up)
-    mac_retry_h: float = 0.25  # a failed scan is retried this soon (or as soon as the Mac is back)
+    mac_retry_h: float = 0.25  # a failed scan is retried this soon
+    mac_away_retry_min: float = 1.0  # ...but one that failed because the Mac was away, this soon
     folders_refresh_min: float = 5.0  # D: folder sizes for the dashboard (0 = only at scans)
     mac_folders_refresh_min: float = 60.0  # the same for MEGA, only while the Mac is up
     min_age_min: int = 10

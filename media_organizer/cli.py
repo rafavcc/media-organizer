@@ -13,7 +13,7 @@ from .config import DEFAULT_CONFIG_PATH, Config, load_config
 from .legacy import import_legacy
 from .locations import Location, MacUnreachable, build_locations
 from .probe import check_tools
-from .service import SCANS, Service
+from .service import SCANS, Service, retry_wait_s
 from .shrink import shrink_file
 
 try:  # optional: tab completion when python3-argcomplete is installed (see README)
@@ -46,7 +46,7 @@ def _scan_text(scan: dict, definition, cfg: Config) -> str:
         return f"{label} {_hhmm(scan['finished'])} ok"
     text = f"{label} {_hhmm(scan['finished'])} {scan['message'] or 'failed'}"
     if definition.location in MAC_LOCATIONS:
-        text += f", retry {_hhmm(scan['finished'] + cfg.mac_retry_h * 3600)}"
+        text += f", retry {_hhmm(scan['finished'] + retry_wait_s(cfg, scan['message']))}"
     return text
 
 

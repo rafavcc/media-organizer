@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 from . import db
 from .config import Config
-from .service import SCANS, scan_interval_h
+from .service import SCANS, retry_wait_s, scan_interval_h
 
 DAILY_DAYS = 30
 HOURLY_HOURS = 48
@@ -148,9 +148,9 @@ def _scans(con, cfg: Config) -> list[dict]:
                         "message": "", "next": None})
             continue
         ok = None if last["ok"] is None else bool(last["ok"])
-        wait = scan_interval_h(cfg, scan) if ok else cfg.mac_retry_h
+        wait = scan_interval_h(cfg, scan) * 3600 if ok else retry_wait_s(cfg, last["message"])
         out.append({"name": scan.name, "kind": scan.kind, "finished": last["finished"], "ok": ok,
-                    "message": last["message"] or "", "next": last["finished"] + wait * 3600})
+                    "message": last["message"] or "", "next": last["finished"] + wait})
     return out
 
 

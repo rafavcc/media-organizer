@@ -62,6 +62,11 @@ def scan_interval_h(cfg: Config, scan: ScanDef) -> float:
     return cfg.mega_full_scan_interval_h if scan.location == "mega" else cfg.full_scan_interval_h
 
 
+def retry_wait_s(cfg: Config, message: str | None) -> float:
+    """Seconds before a failed scan runs again: quickly when only the Mac was away."""
+    return cfg.mac_away_retry_min * 60 if message == "unreachable" else cfg.mac_retry_h * 3600
+
+
 def due_scans(con, cfg: Config, now: float, mac_up: bool = False) -> list[ScanDef]:
     """Scans due now. With `mac_up`, a scan that failed because the Mac was away is due at once."""
     due = []
@@ -72,8 +77,9 @@ def due_scans(con, cfg: Config, now: float, mac_up: bool = False) -> list[ScanDe
         elif mac_up and not last["ok"] and last["message"] == "unreachable":
             is_due = True
         else:
-            wait = scan_interval_h(cfg, scan) if last["ok"] else cfg.mac_retry_h
-            is_due = now - last["finished"] >= wait * 3600
+            wait = (scan_interval_h(cfg, scan) * 3600 if last["ok"]
+                    else retry_wait_s(cfg, last["message"]))
+            is_due = now - last["finished"] >= wait
         if is_due:
             due.append(scan)
     full_locations = {s.location for s in due if s.kind == "full"}

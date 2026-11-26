@@ -165,7 +165,7 @@ class StatsTest(unittest.TestCase):
                        message="unreachable")
         scans = {x["name"]: x for x in stats.summary(self.con, self.cfg)["scans"]}
         self.assertEqual(scans["d-intake"]["next"], 1000.0 + self.cfg.scan_interval_h * 3600)
-        self.assertEqual(scans["mac-downloads"]["next"], 1000.0 + self.cfg.mac_retry_h * 3600)
+        self.assertEqual(scans["mac-downloads"]["next"], 1000.0 + self.cfg.mac_away_retry_min * 60)
         self.assertIsNone(scans["d-full"]["next"])
         self.assertEqual(scans["d-full"]["kind"], "full")
 

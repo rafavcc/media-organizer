@@ -16,6 +16,7 @@
 # full_scan_interval_h = 168.0
 # mega_full_scan_interval_h = 0.5
 # mac_retry_h = 0.25
+# mac_away_retry_min = 1.0
 # folders_refresh_min = 5.0       # how often the dashboard's D: folder sizes are recounted
 # mac_folders_refresh_min = 60.0  # the same for MEGA (only while the Mac is up)
 # min_age_min = 10
